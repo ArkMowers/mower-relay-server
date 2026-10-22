@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mower-relay-server"
+version = "0.1.0"
+description = "Mower 专用 HTTPS/WSS 中转服务"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = ["aiohttp==3.13.3", "itsdangerous==2.2.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9", "cryptography>=43,<49", "ruff>=0.11,<1", "build>=1,<2"]
+
+[project.scripts]
+mower-relay-server = "mower_relay_server.server:main"
+mower-relay-admin = "mower_relay_server.admin:main"
+
+[project.urls]
+Repository = "https://github.com/ArkMowers/mower-relay-server"
+
+[tool.setuptools.packages.find]
+include = ["mower_relay_server*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

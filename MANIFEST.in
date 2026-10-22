@@ -1,0 +1,2 @@
+include README.md LICENSE requirements.txt start.ps1 start.sh
+recursive-include docs *.md

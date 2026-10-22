@@ -1,0 +1,17 @@
+.venv/
+.relay-venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+data/
+ui-dist/
+certificates/
+*.key
+*.pem
+*.crt
+.env
+.DS_Store
