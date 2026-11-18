@@ -1,6 +1,7 @@
 """Serve administrator-published frontend builds, shared by connected instances."""
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -17,6 +18,7 @@ BUILD = re.compile(r"[0-9a-f]{64}")
 ARCHIVE_LIMIT = 32 * 1024 * 1024
 BUILD_LIMIT = 64 * 1024 * 1024
 CACHE_LIMIT = 256 * 1024 * 1024
+RELEASE_API = "https://api.github.com/repos"
 PUBLISHERS = ("ArkMowers/arknights-mower", "ArkMowers/mower-relay-server")
 
 
@@ -110,14 +112,34 @@ class UiCache:
 
     async def download(self, build, archive):
         timeout = aiohttp.ClientTimeout(total=240, sock_connect=12, sock_read=40)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
             for repo in PUBLISHERS:
-                url = f"https://github.com/{repo}/releases/download/relay-ui/ui-{build}.zip"
-                async with session.get(url) as response:
-                    if response.status == 404:
+                base = f"{RELEASE_API}/{repo}/releases"
+                async with session.get(f"{base}/tags/relay-ui") as metadata:
+                    if metadata.status == 404:
                         continue
+                    metadata.raise_for_status()
+                    release = await metadata.json()
+                asset = next(
+                    (
+                        item
+                        for item in release["assets"]
+                        if item["name"] == f"ui-{build}.zip"
+                    ),
+                    None,
+                )
+                if asset is None:
+                    continue
+                digest = str(asset.get("digest", "")).removeprefix("sha256:")
+                if not BUILD.fullmatch(digest) or type(asset.get("id")) is not int:
+                    raise ValueError("官方发布缺少前端校验信息")
+                calculated = hashlib.sha256()
+                async with session.get(
+                    f"{base}/assets/{asset['id']}",
+                    headers={"Accept": "application/octet-stream"},
+                ) as response:
                     response.raise_for_status()
-                    total = response.content_length or 0
+                    total = int(asset["size"])
                     if total > ARCHIVE_LIMIT:
                         raise ValueError("前端压缩包超过下载上限")
                     state = self.states[build] = {
@@ -130,7 +152,10 @@ class UiCache:
                             state["received"] += len(chunk)
                             if state["received"] > ARCHIVE_LIMIT:
                                 raise ValueError("前端压缩包超过下载上限")
+                            calculated.update(chunk)
                             output.write(chunk)
+                    if state["received"] != total or calculated.hexdigest() != digest:
+                        raise ValueError("下载的前端与官方发布校验值不符")
                     return
         raise ValueError("官方构建尚未发布，请稍后重试")
 

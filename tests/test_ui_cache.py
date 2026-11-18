@@ -1,9 +1,11 @@
 import asyncio
+import hashlib
 import json
 from unittest.mock import Mock
 from zipfile import ZipFile
 
 import pytest
+from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from mower_relay_server import ui_cache
@@ -131,5 +133,56 @@ def test_mismatch_keeps_cache_clean_and_explicit_retry(tmp_path, monkeypatch):
         cache.state(A, retry=True)
         await cache.jobs[A]
         assert cache.state(A)["phase"] == "ready"
+
+    asyncio.run(scenario())
+
+
+def test_download_verifies_official_digest(tmp_path, monkeypatch):
+    async def scenario():
+        payload = b"official-ui"
+        digest = hashlib.sha256(payload).hexdigest()
+        routes = web.Application()
+
+        async def missing(request):
+            raise web.HTTPNotFound()
+
+        async def metadata(request):
+            return web.json_response(
+                {
+                    "assets": [
+                        {
+                            "name": f"ui-{A}.zip",
+                            "id": 7,
+                            "size": len(payload),
+                            "digest": "sha256:" + digest,
+                        }
+                    ]
+                }
+            )
+
+        async def download(request):
+            assert request.headers["Accept"] == "application/octet-stream"
+            return web.Response(body=payload)
+
+        routes.router.add_get(
+            "/ArkMowers/arknights-mower/releases/tags/relay-ui", missing
+        )
+        routes.router.add_get(
+            "/ArkMowers/mower-relay-server/releases/tags/relay-ui", metadata
+        )
+        routes.router.add_get(
+            "/ArkMowers/mower-relay-server/releases/assets/7", download
+        )
+        async with TestServer(routes) as upstream:
+            monkeypatch.setattr(
+                ui_cache, "RELEASE_API", str(upstream.make_url("/")).rstrip("/")
+            )
+            cache = ui_cache.UiCache(tmp_path, lambda: {A})
+            await cache.download(A, tmp_path / "good.zip")
+            assert (tmp_path / "good.zip").read_bytes() == payload
+            assert cache.states[A]["received"] == len(payload)
+            digest = "0" * 64
+            with pytest.raises(ValueError, match="校验值"):
+                await cache.download(A, tmp_path / "bad.zip")
 
     asyncio.run(scenario())
