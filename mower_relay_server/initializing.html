@@ -4,7 +4,7 @@
 <style>
 :root{color-scheme:light dark;font:16px system-ui,sans-serif}body{min-height:90vh;display:grid;place-items:center;margin:0}main{width:min(28rem,85vw)}h1{font-size:1.4rem}progress{width:100%;accent-color:#42856d}p{line-height:1.6}button{font:inherit;padding:.5rem 1rem;cursor:pointer}
 </style>
-<main><h1>正在准备此实例的 Mower 界面</h1><progress id="bar" aria-label="前端下载进度"></progress><p id="message" role="status">正在检查缓存…</p><button type="button" hidden>重试</button></main>
+<main><h1>正在准备此实例的 Mower 界面</h1><progress id="bar" aria-label="前端下载进度"></progress><p id="message" role="status">正在检查缓存…</p><p>准备期间可以关闭页面，稍后再打开。</p><button type="button" hidden>重试</button></main>
 <script>
 const bar=document.querySelector('progress'), message=document.querySelector('p'), retry=document.querySelector('button')
 const labels={waiting:'等待下载对应版本…',download:'正在下载前端…',verify:'正在校验并解压前端…'}

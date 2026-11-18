@@ -201,6 +201,8 @@ class Gateway:
                     raise ValueError("前端构建标识无效")
                 peer.ui_build = ready["ui_build"] = build
             await ws.send_json(ready)
+            if peer.ui_build:
+                self.cache.state(peer.ui_build)
             async for frame in ws:
                 if frame.type != WSMsgType.TEXT:
                     break
@@ -453,7 +455,7 @@ class Gateway:
         return response
 
 
-def create_app(registry, ui, session_key, admin_token):
+def create_app(registry, ui, session_key, admin_token, *, prefetch=False):
     gateway = Gateway(registry, ui, session_key)
     traffic = OrderedDict()
 
@@ -511,12 +513,23 @@ def create_app(registry, ui, session_key, admin_token):
     app.router.add_get("/__mower/connect", gateway.connect)
     app.router.add_route("*", "/{path:.*}", gateway.handle)
 
+    channel_task = None
+
+    async def start_channels(app):
+        nonlocal channel_task
+        channel_task = asyncio.create_task(gateway.cache.prefetch_channels())
+
     async def shutdown(app):
+        if channel_task is not None:
+            channel_task.cancel()
+            await asyncio.gather(channel_task, return_exceptions=True)
         await gateway.cache.close()
         await asyncio.gather(
             *(peer.ws.close() for peer in list(gateway.peers.values()))
         )
 
+    if prefetch:
+        app.on_startup.append(start_channels)
     app.on_shutdown.append(shutdown)
     return app
 
@@ -568,6 +581,7 @@ def main():
         location(args.ui, "ui-dist"),
         read_or_create_secret(location(args.session_key_file, "data/session-key.txt")),
         read_or_create_secret(location(args.admin_token_file, "data/admin-token.txt")),
+        prefetch=True,
     )
     # 页面查询参数可能含实例 token，关闭访问日志。
     web.run_app(

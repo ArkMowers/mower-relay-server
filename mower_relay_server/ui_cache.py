@@ -9,10 +9,13 @@ import shutil
 import stat
 import tempfile
 import time
-from pathlib import Path, PurePosixPath, PureWindowsPath
+import zlib
+from pathlib import Path
 from zipfile import ZipFile
 
 import aiohttp
+
+from mower_relay_server import ui_delta
 
 BUILD = re.compile(r"[0-9a-f]{64}")
 ARCHIVE_LIMIT = 32 * 1024 * 1024
@@ -21,6 +24,28 @@ CACHE_LIMIT = 256 * 1024 * 1024
 MIN_DOWNLOAD_RATE = 8 * 1024  # Bytes per second for a slow GitHub connection.
 RELEASE_API = "https://api.github.com/repos"
 PUBLISHERS = ("ArkMowers/arknights-mower", "ArkMowers/mower-relay-server")
+
+
+async def read_json_asset(session, base, asset, limit):
+    size = asset.get("size")
+    digest = asset.get("digest", "")
+    if (
+        type(size) is not int
+        or not 0 < size <= limit
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+    ):
+        raise ValueError("官方清单元数据无效")
+    async with session.get(
+        f"{base}/assets/{asset['id']}", headers={"Accept": "application/octet-stream"}
+    ) as response:
+        response.raise_for_status()
+        data = await response.content.readexactly(size)
+        if (
+            await response.content.read(1)
+            or hashlib.sha256(data).hexdigest() != digest[7:]
+        ):
+            raise ValueError("官方清单校验失败")
+        return json.loads(data)
 
 
 def asset_download_timeout(size):
@@ -37,19 +62,8 @@ def unpack(archive, destination, build):
         if len(entries) > 8192 or sum(item.file_size for item in entries) > BUILD_LIMIT:
             raise ValueError("前端文件超过缓存限制")
         for item in entries:
-            path = PurePosixPath(item.filename)
-            if (
-                not path.parts
-                or path.is_absolute()
-                or ".." in path.parts
-                or "\\" in item.filename
-                or ":" in item.filename
-                or stat.S_ISLNK(item.external_attr >> 16)
-                or any(
-                    part.rstrip(". ") != part or PureWindowsPath(part).is_reserved()
-                    for part in path.parts
-                )
-            ):
+            path = ui_delta.safe_path(item.filename)
+            if stat.S_ISLNK(item.external_attr >> 16):
                 raise ValueError("前端包路径无效")
             target = destination.joinpath(*path.parts)
             if item.is_dir():
@@ -58,6 +72,10 @@ def unpack(archive, destination, build):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with bundle.open(item) as src, target.open("xb") as dst:
                     shutil.copyfileobj(src, dst, 65536)
+    validate_build(destination, build)
+
+
+def validate_build(destination, build):
     if json.loads((destination / "relay-ui.json").read_bytes()).get("build") != build:
         raise ValueError("前端构建标识不匹配")
     pages = json.loads((destination / "frontend-routes.json").read_bytes())
@@ -79,6 +97,7 @@ class UiCache:
         self.states = {}
         self.lock = asyncio.Lock()
         self.capacity = CACHE_LIMIT
+        self.channels = {}
 
     def directory(self, build):
         if not isinstance(build, str) or not BUILD.fullmatch(build):
@@ -102,24 +121,90 @@ class UiCache:
         self.root.mkdir(parents=True, exist_ok=True)
         used = 0
         entries = []
+        references = {}
         for path in self.root.iterdir():
             if path.is_dir() and BUILD.fullmatch(path.name):
-                size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
-                used += size
-                entries.append((path.stat().st_mtime, path, size))
+                inodes = {}
+                for file in path.rglob("*"):
+                    if file.is_file():
+                        info = file.stat()
+                        inodes[(info.st_dev, info.st_ino)] = info.st_size
+                for key, size in inodes.items():
+                    if key not in references:
+                        used += size
+                    references[key] = references.get(key, 0) + 1
+                entries.append((path.stat().st_mtime, path, inodes))
             elif path.is_dir() and path.name.startswith(".incoming-"):
                 shutil.rmtree(path)
         reserve = ARCHIVE_LIMIT + BUILD_LIMIT
-        for _, path, size in sorted(entries):
-            if used + reserve <= self.capacity:
-                break
-            if path.name not in self.pinned():
+        protected = self.pinned()
+        channels = set(self.channels.values())
+        keep = protected | channels
+        idle = sum(path.name not in keep for _, path, _ in entries)
+        for _, path, inodes in sorted(
+            entries, key=lambda e: (e[1].name in channels, e[0])
+        ):
+            if path.name not in protected and (
+                used + reserve > self.capacity
+                or (path.name not in channels and idle > 2)
+            ):
+                if path.name not in channels:
+                    idle -= 1
                 shutil.rmtree(path)
-                used -= size
+                for key, size in inodes.items():
+                    references[key] -= 1
+                    if not references[key]:
+                        used -= size
         if used + reserve > self.capacity:
             raise ValueError("缓存空间已被在线实例占用")
 
-    async def download(self, build, archive):
+    async def incremental(self, session, base, manifest, asset, build, directory):
+        directories = [
+            p for p in self.root.iterdir() if BUILD.fullmatch(p.name) and p.is_dir()
+        ]
+        if not directories:
+            return False
+        document = await read_json_asset(session, base, manifest, 2 * 1024 * 1024)
+        files = ui_delta.members(
+            document, build, asset["digest"][7:], asset["size"], BUILD_LIMIT
+        )
+        cached = await asyncio.to_thread(
+            ui_delta.cached_files, directories, {f["size"] for f in files}
+        )
+        state = self.states.setdefault(build, {})
+        url = f"{base}/assets/{asset['id']}"
+
+        async def fetch(start, end):
+            nonlocal url
+            count = end - start
+            headers = {
+                "Accept": "application/octet-stream",
+                "Range": f"bytes={start}-{end - 1}",
+                "Accept-Encoding": "identity",
+            }
+            async with session.get(
+                url, headers=headers, timeout=asset_download_timeout(count)
+            ) as response:
+                if (
+                    response.status != 206
+                    or response.headers.get("Content-Range")
+                    != f"bytes {start}-{end - 1}/{asset['size']}"
+                ):
+                    raise ValueError("发布源未返回请求的文件区间")
+                url = response.url
+                data = bytearray()
+                async for chunk in response.content.iter_chunked(65536):
+                    if len(data) + len(chunk) > count:
+                        raise ValueError("前端下载区间无效")
+                    data.extend(chunk)
+                    state["received"] += len(chunk)
+                if len(data) != count:
+                    raise ValueError("前端下载区间不完整")
+                return data
+
+        return await ui_delta.reconstruct(files, cached, directory, fetch, state)
+
+    async def download(self, build, archive, directory=None):
         timeout = aiohttp.ClientTimeout(total=240, sock_connect=12, sock_read=40)
         async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
             for repo in PUBLISHERS:
@@ -143,6 +228,32 @@ class UiCache:
                 if not BUILD.fullmatch(digest) or type(asset.get("id")) is not int:
                     raise ValueError("官方发布缺少前端校验信息")
                 total = asset.get("size")
+                sidecar = next(
+                    (
+                        a
+                        for a in release["assets"]
+                        if a["name"] == f"ui-{build}.files.json"
+                    ),
+                    None,
+                )
+                if sidecar and directory is not None:
+                    try:
+                        if await self.incremental(
+                            session, base, sidecar, asset, build, directory
+                        ):
+                            validate_build(directory, build)
+                            return True
+                    except (
+                        ValueError,
+                        TypeError,
+                        KeyError,
+                        OSError,
+                        aiohttp.ClientError,
+                        asyncio.IncompleteReadError,
+                        zlib.error,
+                    ):
+                        shutil.rmtree(directory)
+                        directory.mkdir()
                 calculated = hashlib.sha256()
                 async with session.get(
                     f"{base}/assets/{asset['id']}",
@@ -177,16 +288,11 @@ class UiCache:
                     stage = Path(temp)
                     archive, content = stage / "ui.zip", stage / "ui"
                     content.mkdir()
-                    await self.download(build, archive)
+                    assembled = await self.download(build, archive, content)
                     self.states[build] = {"phase": "verify"}
                     # Extraction must finish before cleaning up its workspace at shutdown.
-                    worker = asyncio.create_task(
-                        asyncio.to_thread(unpack, archive, content, build)
-                    )
-                    try:
-                        await asyncio.shield(worker)
-                    finally:
-                        await worker
+                    if not assembled:
+                        await ui_delta.finish_io(unpack, archive, content, build)
                     content.rename(self.directory(build))
                 self.states.pop(build, None)
         except ValueError as exc:
@@ -205,6 +311,39 @@ class UiCache:
             self.jobs.pop(build, None)
             for key in set(self.states) - self.pinned() - self.jobs.keys():
                 self.states.pop(key, None)
+
+    async def refresh_channels(self):
+        base = f"{RELEASE_API}/{PUBLISHERS[0]}/releases"
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30), trust_env=True
+        ) as session:
+            async with session.get(f"{base}/tags/relay-ui") as response:
+                response.raise_for_status()
+                release = await response.json()
+            assets = {asset["name"]: asset for asset in release["assets"]}
+            for name in ("alpha", "stable"):
+                asset = assets.get(f"channel-{name}.json")
+                if asset:
+                    data = await read_json_asset(session, base, asset, 1024)
+                    build = data["build"]
+                    self.directory(build)
+                    self.channels[name] = build
+                    self.state(build)
+
+    async def prefetch_channels(self):
+        while True:
+            try:
+                await self.refresh_channels()
+            except (
+                aiohttp.ClientError,
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+                asyncio.IncompleteReadError,
+            ):
+                pass
+            await asyncio.sleep(900)
 
     async def close(self):
         jobs = list(self.jobs.values())

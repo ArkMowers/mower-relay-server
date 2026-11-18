@@ -37,7 +37,7 @@ def test_initialization_and_build_isolation(tmp_path, monkeypatch):
         release = asyncio.Event()
         calls = []
 
-        async def download(build, archive):
+        async def download(build, archive, directory=None):
             calls.append(build)
             await release.wait()
             write_zip(archive, build)
@@ -119,7 +119,7 @@ def test_mismatch_keeps_cache_clean_and_explicit_retry(tmp_path, monkeypatch):
     cache = ui_cache.UiCache(tmp_path, lambda: {A})
     calls = []
 
-    async def download(build, archive):
+    async def download(build, archive, directory=None):
         calls.append(build)
         write_zip(archive, B if len(calls) == 1 else A)
 
@@ -202,11 +202,11 @@ def test_release_timeout_allows_slow_progress_but_bounds_stalls():
 def test_release_timeout_cleans_stage_and_allows_retry(tmp_path, monkeypatch):
     cache = ui_cache.UiCache(tmp_path, lambda: {A})
 
-    async def stalled(build, archive):
+    async def stalled(build, archive, directory=None):
         archive.write_bytes(b"partial")
         raise TimeoutError
 
-    async def success(build, archive):
+    async def success(build, archive, directory=None):
         write_zip(archive, build)
 
     async def scenario():
