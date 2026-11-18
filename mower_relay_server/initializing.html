@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>准备 Mower 界面</title>
+<style>
+:root{color-scheme:light dark;font:16px system-ui,sans-serif}body{min-height:90vh;display:grid;place-items:center;margin:0}main{width:min(28rem,85vw)}h1{font-size:1.4rem}progress{width:100%;accent-color:#42856d}p{line-height:1.6}button{font:inherit;padding:.5rem 1rem;cursor:pointer}
+</style>
+<main><h1>正在准备此实例的 Mower 界面</h1><progress id="bar" aria-label="前端下载进度"></progress><p id="message" role="status">正在检查缓存…</p><button type="button" hidden>重试</button></main>
+<script>
+const bar=document.querySelector('progress'), message=document.querySelector('p'), retry=document.querySelector('button')
+const labels={waiting:'等待下载对应版本…',download:'正在下载前端…',verify:'正在校验并解压前端…'}
+async function refresh(manual=false){
+  retry.hidden=true
+  try{
+    const r=await fetch('/__mower/ui-state',{method:manual?'POST':'GET',cache:'no-store',signal:AbortSignal.timeout(10000)})
+    if(r.status===401){location.reload();return}
+    if(!r.ok)throw Error('无法读取初始化进度')
+    const s=await r.json()
+    if(s.phase==='ready'){location.reload();return}
+    if(s.phase==='error')throw Error(s.message)
+    message.textContent=labels[s.phase]
+    if(s.phase==='download' && s.total){bar.max=s.total;bar.value=s.received;message.textContent+=' '+(s.received/1048576).toFixed(1)+' / '+(s.total/1048576).toFixed(1)+' MiB'}
+    else bar.removeAttribute('value')
+    setTimeout(refresh,1000)
+  }catch(e){bar.removeAttribute('value');message.textContent=e.message;retry.hidden=false}
+}
+retry.onclick=()=>refresh(true)
+refresh()
+</script></html>

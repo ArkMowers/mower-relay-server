@@ -34,8 +34,11 @@ from mower_relay_server.protocol import (
     valid_subdomain,
     validate_response,
 )
+from mower_relay_server.ui_cache import BUILD, UiCache
 
-LOGIN = """<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Mower 登录</title><body><main style="max-width:360px;margin:15vh auto;font-family:sans-serif"><h1>Mower 远程访问</h1><form method="post" action="/__mower/login"><p><input name="username" autocomplete="username" placeholder="本地设置的用户名" required maxlength="64"></p><p><input name="password" type="password" autocomplete="current-password" placeholder="本地设置的密码" required maxlength="256"></p><button>登录</button></form><p>登录信息由你的 Mower 实例验证。登录后仍需实例 token。</p></main></body></html>"""
+BASIC_CHALLENGE = 'Basic realm="Mower", charset="UTF-8"'
+
+INITIALIZING = Path(__file__).with_name("initializing.html")
 COOKIE = "__Host-mower_relay"
 GATEWAY = web.AppKey("gateway", object)
 
@@ -67,6 +70,8 @@ class Peer:
         self.request_window = time.monotonic()
         self.requests = 0
         self.inflight = 0
+        self.ui_build = None
+        self.ui_pages = None
 
     def charge(self, size):
         now = time.monotonic()
@@ -105,6 +110,10 @@ class Gateway:
             raise ValueError("网关会话密钥至少需要 32 个字符")
         self.signer = URLSafeTimedSerializer(session_key, salt="mower-relay-v1")
         self.peers = {}
+        self.cache = UiCache(
+            self.ui.parent / "relay-ui-cache",
+            lambda: {peer.ui_build for peer in self.peers.values()},
+        )
         self.failures = OrderedDict()
         manifest = self.ui / "frontend-routes.json"
         self.pages = {
@@ -179,9 +188,19 @@ class Gateway:
         try:
             await ws.prepare(request)
             hello = await ws.receive_json(timeout=10)
-            if hello != {"op": "hello", "version": VERSION}:
+            if (
+                not isinstance(hello, dict)
+                or hello.get("op") != "hello"
+                or hello.get("version") != VERSION
+            ):
                 raise ValueError("协议版本无效")
-            await ws.send_json({"op": "ready", "version": VERSION})
+            ready = {"op": "ready", "version": VERSION}
+            if "ui_build" in hello:
+                build = hello["ui_build"]
+                if not isinstance(build, str) or not BUILD.fullmatch(build):
+                    raise ValueError("前端构建标识无效")
+                peer.ui_build = ready["ui_build"] = build
+            await ws.send_json(ready)
             async for frame in ws:
                 if frame.type != WSMsgType.TEXT:
                     break
@@ -251,8 +270,18 @@ class Gateway:
             await ws.close()
         return ws
 
-    async def login(self, request, name, peer):
-        self.same_origin(request, name)
+    async def basic_login(self, request, name, peer):
+        challenge = {"WWW-Authenticate": BASIC_CHALLENGE}
+        scheme, _, encoded = request.headers.get("Authorization", "").partition(" ")
+        if scheme.lower() != "basic":
+            raise web.HTTPUnauthorized(headers=challenge)
+        try:
+            decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+        except (ValueError, UnicodeError):
+            raise web.HTTPUnauthorized(headers=challenge) from None
+        username, separator, password = decoded.partition(":")
+        if not separator or not username or len(username) > 64 or not password:
+            raise web.HTTPUnauthorized(headers=challenge)
         now = time.monotonic()
         attempts = [value for value in self.failures.get(name, []) if now - value < 60]
         if len(attempts) >= 5:
@@ -262,23 +291,32 @@ class Gateway:
         self.failures.move_to_end(name)
         while len(self.failures) > 2048:
             self.failures.popitem(last=False)
-        data = await request.post()
-        username, password = data.get("username"), data.get("password")
-        if (
-            not isinstance(username, str)
-            or not isinstance(password, str)
-            or len(username) > 64
-            or len(password) > 256
-        ):
-            raise web.HTTPBadRequest()
         ok = await peer.request(
             {"op": "authenticate", "username": username, "password": password},
             "login",
             timeout=15,
         )
         if not ok:
-            return web.Response(text="用户名或密码错误", status=401)
-        response = web.Response(status=303, headers={"Location": "/"})
+            raise web.HTTPUnauthorized(headers=challenge)
+
+    async def handle(self, request):
+        name = self.tenant(request)
+        peer = self.peer(name)
+        if self.authenticated(request, name, peer):
+            return await self.serve(request, name, peer)
+        if request.headers.get("Sec-Fetch-Site") == "cross-site" and not (
+            request.method == "GET"
+            and (request.path == "/" or request.path in self.pages)
+            and html_navigation(request)
+        ):
+            raise web.HTTPForbidden()
+        origin = request.headers.get("Origin")
+        if origin and origin != public_origin(name):
+            raise web.HTTPForbidden()
+        await self.basic_login(request, name, peer)
+        response = await self.serve(request, name, peer)
+        if response.prepared or request.path == "/__mower/logout":
+            return response
         response.set_cookie(
             COOKIE,
             self.signer.dumps({"tenant": name, "connection": peer.generation}),
@@ -290,15 +328,15 @@ class Gateway:
         )
         return response
 
-    async def handle(self, request):
-        name = self.tenant(request)
-        peer = self.peer(name)
-        if request.path == "/__mower/login" and request.method == "POST":
-            return await self.login(request, name, peer)
-        if not self.authenticated(request, name, peer):
-            if request.method == "GET" and html_navigation(request):
-                return web.Response(text=LOGIN, content_type="text/html")
-            raise web.HTTPUnauthorized()
+    async def serve(self, request, name, peer):
+        page_build = request.headers.get("X-Mower-UI-Build")
+        if request.headers.get("Upgrade", "").lower() == "websocket":
+            page_build = request.query.get("relay_build")
+        if page_build and page_build != peer.ui_build:
+            raise web.HTTPConflict(
+                text="实例版本已更新，请刷新页面", headers={"X-Mower-UI-Reload": "1"}
+            )
+
         if (
             request.method not in {"GET", "HEAD"}
             or request.headers.get("Upgrade", "").lower() == "websocket"
@@ -339,16 +377,42 @@ class Gateway:
                 if not peer.ws.closed:
                     await peer.ws.send_json({"op": "ws_close", "id": key})
             return socket
+        ui_root, pages = self.ui, self.pages
+        if peer.ui_build:
+            build = peer.ui_build
+            if request.path == "/__mower/ui-state" and request.method in {
+                "GET",
+                "POST",
+            }:
+                return web.json_response(
+                    self.cache.state(build, retry=request.method == "POST")
+                )
+            ui_root = self.cache.directory(build)
+            if not ui_root.is_dir():
+                if request.method == "GET" and (
+                    request.path == "/" or html_navigation(request)
+                ):
+                    self.cache.state(build)
+                    return web.FileResponse(INITIALIZING)
+                if not allowed_request(request.method, request.path_qs):
+                    raise web.HTTPServiceUnavailable(text="前端正在准备")
+            else:
+                if peer.ui_pages is None:
+                    os.utime(ui_root)
+                    peer.ui_pages = set(
+                        json.loads((ui_root / "frontend-routes.json").read_bytes())
+                    )
+                pages = peer.ui_pages
         if request.method in {"GET", "HEAD"}:
             if (
                 request.path == "/"
-                or request.path.rstrip("/").lower() in self.pages
+                or request.path.rstrip("/").lower() in pages
                 and html_navigation(request)
             ):
-                return web.FileResponse(self.ui / "index.html")
+                return web.FileResponse(ui_root / "index.html")
             if not allowed_request(request.method, request.path):
-                path = (self.ui / request.path.lstrip("/")).resolve()
-                if path.is_relative_to(self.ui) and path.is_file():
+                path = (ui_root / request.path.lstrip("/")).resolve()
+                if path.is_relative_to(ui_root) and path.is_file():
                     return web.FileResponse(path)
                 raise web.HTTPNotFound()
         if not allowed_request(request.method, request.path_qs):
@@ -366,7 +430,12 @@ class Gateway:
                     "path": request.path_qs,
                     "headers": {
                         key: request.headers[key]
-                        for key in ("token", "content-type")
+                        for key in (
+                            "token",
+                            "content-type",
+                            "x-mower-config-generation",
+                            "x-mower-settings",
+                        )
                         if key in request.headers
                     },
                     "body": base64.b64encode(body).decode(),
@@ -392,11 +461,23 @@ def create_app(registry, ui, session_key, admin_token):
     async def entry_limit(request, handler):
         now = time.monotonic()
         address = request.remote
-        tokens, previous = traffic.get(address, (40, now))
-        tokens = min(40, tokens + (now - previous) * 20)
+        static = request.method in {"GET", "HEAD"} and request.path.startswith(
+            (
+                "/assets/",
+                "/avatar/",
+                "/depot/",
+                "/building_skill/",
+                "/product/",
+                "/shop/",
+            )
+        )
+        bucket = (address, static)
+        burst = 256 if static else 40
+        tokens, previous = traffic.get(bucket, (burst, now))
+        tokens = min(burst, tokens + (now - previous) * 20)
         allowed = tokens >= 1
-        traffic[address] = (tokens - 1 if allowed else tokens, now)
-        traffic.move_to_end(address)
+        traffic[bucket] = (tokens - 1 if allowed else tokens, now)
+        traffic.move_to_end(bucket)
         while len(traffic) > 4096:
             traffic.popitem(last=False)
         if not allowed:
@@ -431,6 +512,7 @@ def create_app(registry, ui, session_key, admin_token):
     app.router.add_route("*", "/{path:.*}", gateway.handle)
 
     async def shutdown(app):
+        await gateway.cache.close()
         await asyncio.gather(
             *(peer.ws.close() for peer in list(gateway.peers.values()))
         )

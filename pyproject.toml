@@ -25,6 +25,9 @@ Repository = "https://github.com/ArkMowers/mower-relay-server"
 [tool.setuptools.packages.find]
 include = ["mower_relay_server*"]
 
+[tool.setuptools.package-data]
+mower_relay_server = ["initializing.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

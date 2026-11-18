@@ -324,29 +324,44 @@ def test_gateway_requires_individual_admission_and_local_login_before_http(tmp_p
                     )
                 assert duplicate.value.status == 409
                 host = {"Host": "alice.free.mower.work:58000"}
-                assert (await browser.get("/status", headers=host)).status == 401
+                challenge = await browser.get(
+                    "/", headers={**host, "Accept": "text/html"}
+                )
+                assert challenge.status == 401
                 assert (
-                    await browser.post("/__mower/login", headers=host, data={})
-                ).status == 403
+                    await browser.get(
+                        "/",
+                        headers={
+                            **host,
+                            "Accept": "text/html",
+                            "Sec-Fetch-Site": "cross-site",
+                        },
+                    )
+                ).status == 401
+                assert (
+                    await browser.get(
+                        "/", headers={**host, "Authorization": "Basic !!!"}
+                    )
+                ).status == 401
+                assert (
+                    challenge.headers["WWW-Authenticate"]
+                    == 'Basic realm="Mower", charset="UTF-8"'
+                )
+                password = "短:" + "长" * 300
+                basic = base64.b64encode(f"Alice:{password}".encode()).decode()
                 login_task = asyncio.create_task(
-                    browser.post(
-                        "/__mower/login",
-                        headers={**host, "Origin": public_origin("alice")},
-                        data={"username": "Alice", "password": "a-local-password"},
-                        allow_redirects=False,
+                    browser.get(
+                        "/", headers={**host, "Authorization": f"Basic {basic}"}
                     )
                 )
                 auth = await agent.receive_json(timeout=2)
                 assert auth["op"] == "authenticate"
-                assert (
-                    auth["username"] == "Alice"
-                    and auth["password"] == "a-local-password"
-                )
+                assert auth["username"] == "Alice" and auth["password"] == password
                 await agent.send_json(
                     {"op": "authenticated", "id": auth["id"], "ok": True}
                 )
                 response = await login_task
-                assert response.status == 303
+                assert response.status == 200
                 cookie = response.cookies[COOKIE]
                 assert (
                     cookie["secure"]
@@ -496,10 +511,9 @@ def test_sessions_are_bound_to_tenant_and_connection_and_login_is_limited(tmp_pa
                 gateway.peers["alice"] = Peer(Mock(closed=False))
                 assert (await browser.get("/", headers=headers)).status == 401
                 gateway.failures["alice"] = [asyncio.get_running_loop().time()] * 5
-                limited = await browser.post(
-                    "/__mower/login",
-                    headers={"Host": headers["Host"], "Origin": public_origin("alice")},
-                    data={"username": "guess", "password": "guess"},
+                limited = await browser.get(
+                    "/",
+                    headers={"Host": headers["Host"], "Authorization": "Basic YTpi"},
                 )
                 assert limited.status == 429
                 assert not gateway.peers["alice"].pending
