@@ -18,8 +18,17 @@ BUILD = re.compile(r"[0-9a-f]{64}")
 ARCHIVE_LIMIT = 32 * 1024 * 1024
 BUILD_LIMIT = 64 * 1024 * 1024
 CACHE_LIMIT = 256 * 1024 * 1024
+MIN_DOWNLOAD_RATE = 8 * 1024  # Bytes per second for a slow GitHub connection.
 RELEASE_API = "https://api.github.com/repos"
 PUBLISHERS = ("ArkMowers/arknights-mower", "ArkMowers/mower-relay-server")
+
+
+def asset_download_timeout(size):
+    if type(size) is not int or not 0 < size <= ARCHIVE_LIMIT:
+        raise ValueError("前端压缩包大小无效或超过下载上限")
+    return aiohttp.ClientTimeout(
+        total=120 + size / MIN_DOWNLOAD_RATE, sock_connect=12, sock_read=60
+    )
 
 
 def unpack(archive, destination, build):
@@ -133,15 +142,14 @@ class UiCache:
                 digest = str(asset.get("digest", "")).removeprefix("sha256:")
                 if not BUILD.fullmatch(digest) or type(asset.get("id")) is not int:
                     raise ValueError("官方发布缺少前端校验信息")
+                total = asset.get("size")
                 calculated = hashlib.sha256()
                 async with session.get(
                     f"{base}/assets/{asset['id']}",
                     headers={"Accept": "application/octet-stream"},
+                    timeout=asset_download_timeout(total),
                 ) as response:
                     response.raise_for_status()
-                    total = int(asset["size"])
-                    if total > ARCHIVE_LIMIT:
-                        raise ValueError("前端压缩包超过下载上限")
                     state = self.states[build] = {
                         "phase": "download",
                         "received": 0,
@@ -183,6 +191,11 @@ class UiCache:
                 self.states.pop(build, None)
         except ValueError as exc:
             self.states[build] = {"phase": "error", "message": str(exc)}
+        except TimeoutError:
+            self.states[build] = {
+                "phase": "error",
+                "message": "从 GitHub 下载前端超时，请重试",
+            }
         except Exception:
             self.states[build] = {
                 "phase": "error",

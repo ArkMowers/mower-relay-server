@@ -186,3 +186,38 @@ def test_download_verifies_official_digest(tmp_path, monkeypatch):
                 await cache.download(A, tmp_path / "bad.zip")
 
     asyncio.run(scenario())
+
+
+def test_release_timeout_allows_slow_progress_but_bounds_stalls():
+    size = 14_249_842
+    timeout = ui_cache.asset_download_timeout(size)
+    assert size / (16 * 1024) < timeout.total < 3600
+    assert 0 < timeout.sock_connect < timeout.sock_read <= 60
+    assert ui_cache.asset_download_timeout(1).total < timeout.total
+    for invalid in (None, True, -1, 0, ui_cache.ARCHIVE_LIMIT + 1):
+        with pytest.raises(ValueError):
+            ui_cache.asset_download_timeout(invalid)
+
+
+def test_release_timeout_cleans_stage_and_allows_retry(tmp_path, monkeypatch):
+    cache = ui_cache.UiCache(tmp_path, lambda: {A})
+
+    async def stalled(build, archive):
+        archive.write_bytes(b"partial")
+        raise TimeoutError
+
+    async def success(build, archive):
+        write_zip(archive, build)
+
+    async def scenario():
+        monkeypatch.setattr(cache, "download", stalled)
+        cache.state(A)
+        await cache.jobs[A]
+        assert "超时" in cache.state(A)["message"]
+        assert not list(tmp_path.iterdir())
+        monkeypatch.setattr(cache, "download", success)
+        cache.state(A, retry=True)
+        await cache.jobs[A]
+        assert cache.state(A)["phase"] == "ready"
+
+    asyncio.run(scenario())
