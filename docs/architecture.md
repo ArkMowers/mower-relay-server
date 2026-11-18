@@ -14,7 +14,7 @@
 
 用户打开 `https://<名称>.free.mower.work:58000` 后，登录信息经 TLS 交给本地 Mower 验证。服务端不持久化用户名、密码校验值、密码或实例 token；这些数据仍会在网关内存中经过，TLS 终止方具有读取传输内容的能力。
 
-认证成功签发八小时 Cookie，带 Secure、HttpOnly、SameSite=Strict，并绑定子域名与当前连接。断开、重连和吊销使原会话失效。本地密码至少八字符，由客户端执行验证；密码登录不替代实例 token。每个名称每分钟最多五次登录尝试。
+认证成功签发八小时 Cookie，带 Secure、HttpOnly、SameSite=Strict，并绑定子域名与当前连接。断开、重连和吊销使原会话失效。浏览器通过 HTTP Basic 认证提示输入非空密码，本地客户端验证用户名和密码。实例操作继续校验 token。每个名称每分钟最多五次登录尝试。
 
 只有[明确列出的 HTTP 操作](../mower_relay_server/protocol.py)及 `/log`、`/ws/chat` WebSocket 可以分派。协议不提供目标地址、目标端口、任意 URL 或通用 TCP 流；远程操作交给 Mower 当前进程的 Flask 应用，沿用其 token 校验。软件安装、本地文件选择、通用导入、进程管理及中转设置不在允许范围内。
 

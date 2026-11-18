@@ -35,7 +35,7 @@ from mower_relay_server.protocol import (
     validate_response,
 )
 
-LOGIN = """<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Mower 登录</title><body><main style="max-width:360px;margin:15vh auto;font-family:sans-serif"><h1>Mower 远程访问</h1><form method="post" action="/__mower/login"><p><input name="username" autocomplete="username" placeholder="本地设置的用户名" required maxlength="64"></p><p><input name="password" type="password" autocomplete="current-password" placeholder="本地设置的密码" required maxlength="256"></p><button>登录</button></form><p>登录信息由你的 Mower 实例验证。登录后仍需实例 token。</p></main></body></html>"""
+BASIC_CHALLENGE = 'Basic realm="Mower", charset="UTF-8"'
 COOKIE = "__Host-mower_relay"
 GATEWAY = web.AppKey("gateway", object)
 
@@ -251,8 +251,18 @@ class Gateway:
             await ws.close()
         return ws
 
-    async def login(self, request, name, peer):
-        self.same_origin(request, name)
+    async def basic_login(self, request, name, peer):
+        challenge = {"WWW-Authenticate": BASIC_CHALLENGE}
+        scheme, _, encoded = request.headers.get("Authorization", "").partition(" ")
+        if scheme.lower() != "basic":
+            raise web.HTTPUnauthorized(headers=challenge)
+        try:
+            decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+        except (ValueError, UnicodeError):
+            raise web.HTTPUnauthorized(headers=challenge) from None
+        username, separator, password = decoded.partition(":")
+        if not separator or not username or len(username) > 64 or not password:
+            raise web.HTTPUnauthorized(headers=challenge)
         now = time.monotonic()
         attempts = [value for value in self.failures.get(name, []) if now - value < 60]
         if len(attempts) >= 5:
@@ -262,23 +272,32 @@ class Gateway:
         self.failures.move_to_end(name)
         while len(self.failures) > 2048:
             self.failures.popitem(last=False)
-        data = await request.post()
-        username, password = data.get("username"), data.get("password")
-        if (
-            not isinstance(username, str)
-            or not isinstance(password, str)
-            or len(username) > 64
-            or len(password) > 256
-        ):
-            raise web.HTTPBadRequest()
         ok = await peer.request(
             {"op": "authenticate", "username": username, "password": password},
             "login",
             timeout=15,
         )
         if not ok:
-            return web.Response(text="用户名或密码错误", status=401)
-        response = web.Response(status=303, headers={"Location": "/"})
+            raise web.HTTPUnauthorized(headers=challenge)
+
+    async def handle(self, request):
+        name = self.tenant(request)
+        peer = self.peer(name)
+        if self.authenticated(request, name, peer):
+            return await self.serve(request, name, peer)
+        if request.headers.get("Sec-Fetch-Site") == "cross-site" and not (
+            request.method == "GET"
+            and (request.path == "/" or request.path in self.pages)
+            and html_navigation(request)
+        ):
+            raise web.HTTPForbidden()
+        origin = request.headers.get("Origin")
+        if origin and origin != public_origin(name):
+            raise web.HTTPForbidden()
+        await self.basic_login(request, name, peer)
+        response = await self.serve(request, name, peer)
+        if response.prepared or request.path == "/__mower/logout":
+            return response
         response.set_cookie(
             COOKIE,
             self.signer.dumps({"tenant": name, "connection": peer.generation}),
@@ -290,15 +309,7 @@ class Gateway:
         )
         return response
 
-    async def handle(self, request):
-        name = self.tenant(request)
-        peer = self.peer(name)
-        if request.path == "/__mower/login" and request.method == "POST":
-            return await self.login(request, name, peer)
-        if not self.authenticated(request, name, peer):
-            if request.method == "GET" and html_navigation(request):
-                return web.Response(text=LOGIN, content_type="text/html")
-            raise web.HTTPUnauthorized()
+    async def serve(self, request, name, peer):
         if (
             request.method not in {"GET", "HEAD"}
             or request.headers.get("Upgrade", "").lower() == "websocket"
