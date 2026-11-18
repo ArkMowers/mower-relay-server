@@ -86,6 +86,12 @@ def validate_response(path, status, mime, data):
         or len(mime) > 128
     ):
         raise ValueError("中转响应无效")
+    if status == 204 and not data:
+        return
+    if urlsplit(path).path == "/gui/log-background" and status == 200:
+        if mime == "image/webp" and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            return
+        raise ValueError("日志背景图格式无效")
     kind = response_kind(path)
     if kind == "image" and status < 400:
         if mime == "image/jpeg" and data.startswith(b"\xff\xd8\xff"):
@@ -112,6 +118,13 @@ HTTP_OPERATIONS = [
     (("GET",), "/check-skland-sign"),
     (("GET", "PATCH", "POST"), "/conf"),
     (("GET",), "/config-backup/export"),
+    (("GET",), "/config-profiles"),
+    (("GET",), "/gui/appearance"),
+    (("GET",), "/gui/log-background"),
+    (("GET",), "/db-admin/maintenance"),
+    (("GET",), "/process-control/info"),
+    (("GET",), "/gui/sidebar"),
+    (("GET",), "/daily-status"),
     (("GET",), "/crash-recovery/status"),
     (("GET",), "/cultivate-fetch"),
     (("POST",), "/db-admin/delete"),

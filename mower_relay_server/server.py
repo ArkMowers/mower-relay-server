@@ -34,8 +34,11 @@ from mower_relay_server.protocol import (
     valid_subdomain,
     validate_response,
 )
+from mower_relay_server.ui_cache import BUILD, UiCache
 
 BASIC_CHALLENGE = 'Basic realm="Mower", charset="UTF-8"'
+
+INITIALIZING = Path(__file__).with_name("initializing.html")
 COOKIE = "__Host-mower_relay"
 GATEWAY = web.AppKey("gateway", object)
 
@@ -67,6 +70,8 @@ class Peer:
         self.request_window = time.monotonic()
         self.requests = 0
         self.inflight = 0
+        self.ui_build = None
+        self.ui_pages = None
 
     def charge(self, size):
         now = time.monotonic()
@@ -105,6 +110,10 @@ class Gateway:
             raise ValueError("网关会话密钥至少需要 32 个字符")
         self.signer = URLSafeTimedSerializer(session_key, salt="mower-relay-v1")
         self.peers = {}
+        self.cache = UiCache(
+            self.ui.parent / "relay-ui-cache",
+            lambda: {peer.ui_build for peer in self.peers.values()},
+        )
         self.failures = OrderedDict()
         manifest = self.ui / "frontend-routes.json"
         self.pages = {
@@ -179,9 +188,19 @@ class Gateway:
         try:
             await ws.prepare(request)
             hello = await ws.receive_json(timeout=10)
-            if hello != {"op": "hello", "version": VERSION}:
+            if (
+                not isinstance(hello, dict)
+                or hello.get("op") != "hello"
+                or hello.get("version") != VERSION
+            ):
                 raise ValueError("协议版本无效")
-            await ws.send_json({"op": "ready", "version": VERSION})
+            ready = {"op": "ready", "version": VERSION}
+            if "ui_build" in hello:
+                build = hello["ui_build"]
+                if not isinstance(build, str) or not BUILD.fullmatch(build):
+                    raise ValueError("前端构建标识无效")
+                peer.ui_build = ready["ui_build"] = build
+            await ws.send_json(ready)
             async for frame in ws:
                 if frame.type != WSMsgType.TEXT:
                     break
@@ -310,6 +329,14 @@ class Gateway:
         return response
 
     async def serve(self, request, name, peer):
+        page_build = request.headers.get("X-Mower-UI-Build")
+        if request.headers.get("Upgrade", "").lower() == "websocket":
+            page_build = request.query.get("relay_build")
+        if page_build and page_build != peer.ui_build:
+            raise web.HTTPConflict(
+                text="实例版本已更新，请刷新页面", headers={"X-Mower-UI-Reload": "1"}
+            )
+
         if (
             request.method not in {"GET", "HEAD"}
             or request.headers.get("Upgrade", "").lower() == "websocket"
@@ -350,16 +377,42 @@ class Gateway:
                 if not peer.ws.closed:
                     await peer.ws.send_json({"op": "ws_close", "id": key})
             return socket
+        ui_root, pages = self.ui, self.pages
+        if peer.ui_build:
+            build = peer.ui_build
+            if request.path == "/__mower/ui-state" and request.method in {
+                "GET",
+                "POST",
+            }:
+                return web.json_response(
+                    self.cache.state(build, retry=request.method == "POST")
+                )
+            ui_root = self.cache.directory(build)
+            if not ui_root.is_dir():
+                if request.method == "GET" and (
+                    request.path == "/" or html_navigation(request)
+                ):
+                    self.cache.state(build)
+                    return web.FileResponse(INITIALIZING)
+                if not allowed_request(request.method, request.path_qs):
+                    raise web.HTTPServiceUnavailable(text="前端正在准备")
+            else:
+                if peer.ui_pages is None:
+                    os.utime(ui_root)
+                    peer.ui_pages = set(
+                        json.loads((ui_root / "frontend-routes.json").read_bytes())
+                    )
+                pages = peer.ui_pages
         if request.method in {"GET", "HEAD"}:
             if (
                 request.path == "/"
-                or request.path.rstrip("/").lower() in self.pages
+                or request.path.rstrip("/").lower() in pages
                 and html_navigation(request)
             ):
-                return web.FileResponse(self.ui / "index.html")
+                return web.FileResponse(ui_root / "index.html")
             if not allowed_request(request.method, request.path):
-                path = (self.ui / request.path.lstrip("/")).resolve()
-                if path.is_relative_to(self.ui) and path.is_file():
+                path = (ui_root / request.path.lstrip("/")).resolve()
+                if path.is_relative_to(ui_root) and path.is_file():
                     return web.FileResponse(path)
                 raise web.HTTPNotFound()
         if not allowed_request(request.method, request.path_qs):
@@ -377,7 +430,12 @@ class Gateway:
                     "path": request.path_qs,
                     "headers": {
                         key: request.headers[key]
-                        for key in ("token", "content-type")
+                        for key in (
+                            "token",
+                            "content-type",
+                            "x-mower-config-generation",
+                            "x-mower-settings",
+                        )
                         if key in request.headers
                     },
                     "body": base64.b64encode(body).decode(),
@@ -403,11 +461,23 @@ def create_app(registry, ui, session_key, admin_token):
     async def entry_limit(request, handler):
         now = time.monotonic()
         address = request.remote
-        tokens, previous = traffic.get(address, (40, now))
-        tokens = min(40, tokens + (now - previous) * 20)
+        static = request.method in {"GET", "HEAD"} and request.path.startswith(
+            (
+                "/assets/",
+                "/avatar/",
+                "/depot/",
+                "/building_skill/",
+                "/product/",
+                "/shop/",
+            )
+        )
+        bucket = (address, static)
+        burst = 256 if static else 40
+        tokens, previous = traffic.get(bucket, (burst, now))
+        tokens = min(burst, tokens + (now - previous) * 20)
         allowed = tokens >= 1
-        traffic[address] = (tokens - 1 if allowed else tokens, now)
-        traffic.move_to_end(address)
+        traffic[bucket] = (tokens - 1 if allowed else tokens, now)
+        traffic.move_to_end(bucket)
         while len(traffic) > 4096:
             traffic.popitem(last=False)
         if not allowed:
@@ -442,6 +512,7 @@ def create_app(registry, ui, session_key, admin_token):
     app.router.add_route("*", "/{path:.*}", gateway.handle)
 
     async def shutdown(app):
+        await gateway.cache.close()
         await asyncio.gather(
             *(peer.ws.close() for peer in list(gateway.peers.values()))
         )
