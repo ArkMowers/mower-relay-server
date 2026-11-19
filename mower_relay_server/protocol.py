@@ -7,6 +7,7 @@ from urllib.parse import unquote, urlsplit
 
 DOMAIN = "free.mower.work"
 PORT = 58000
+DEFAULT_ENTRY = "/admin/"
 CONNECT_URL = f"wss://{DOMAIN}:{PORT}/__mower/connect"
 VERSION = 1
 MAX_BODY = 6 * 1024 * 1024
@@ -16,6 +17,15 @@ MAX_SOCKETS = 4
 SUBDOMAIN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?\Z")
 # These operations have no facility for choosing a network destination.
 SOCKETS = {"/log": "log", "/ws/chat": "ws_chat"}
+
+
+def entry_path(value):
+    if not isinstance(value, str) or not 1 <= len(value.removesuffix("/")) < 128:
+        raise ValueError("入口必须是本站的路径，例如 /ops-mower/")
+    path = value.removesuffix("/")
+    if not re.fullmatch(r"(?:/[A-Za-z0-9][A-Za-z0-9_-]*)+", path):
+        raise ValueError("路径各段须以字母或数字开头，可使用连字符和下划线")
+    return path + "/"
 
 
 def valid_subdomain(value):

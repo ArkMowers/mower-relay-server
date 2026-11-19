@@ -4,7 +4,7 @@ Mower 专用的 HTTPS/WSS 中转服务，独立于 [Arknights Mower](https://git
 
 - 用户入口：`https://<名称>.free.mower.work:58000`。
 - 内置客户端连接：`wss://free.mower.work:58000/__mower/connect`。
-- 异机 bot 管理 API：`https://free.mower.work:58000/admin/`，使用独立 Bearer 管理密钥。
+- 异机 bot 管理 API 默认入口：`https://free.mower.work:58000/admin/`，使用独立 Bearer 管理密钥。
 - 管理员审核后发放独立凭据。Mower 用户名、密码校验值和实例 token 由本地 Mower 保存及验证。
 - 服务端只分派明确允许的 Mower 操作，不接受目标地址、端口或通用 TCP 流。前端静态文件由浏览器从 R2 直接读取。
 
@@ -34,6 +34,8 @@ Windows 使用 `py -3.12 -m venv .relay-venv` 及 `.relay-venv\Scripts\python.ex
 前端发布和域名设置见 [R2 配置](docs/r2.md)。网关证书须同时覆盖 `free.mower.work` 和 `*.free.mower.work`。
 
 服务默认监听 `0.0.0.0:58000`，支持 `--bind` 选择监听地址。`--ui-origin`、`--registry`、`--cert-file`、`--key-file`、`--session-key-file` 和 `--admin-token-file` 可覆盖对应路径。证书更新后需要重启服务，客户端会重新连接，用户需重新登录。
+
+网关默认在主域名的 `/admin/` 提供[管理页面](docs/admin-api.md#网关管理页面)，登录后可一并更改网页和管理 API 的入口路径。管理员也可从本机运行 `python -m mower_relay_server.admin_ui`，在浏览器中签发、查看、改名和吊销凭据。参见[本机凭据管理页面](docs/admin-api.md#本机凭据管理页面)。
 
 完整步骤见 [Windows 部署](docs/windows.md)、[Linux/macOS 部署](docs/posix.md)、[bot 管理 API](docs/admin-api.md) 和[服务端行为说明](docs/architecture.md)。
 

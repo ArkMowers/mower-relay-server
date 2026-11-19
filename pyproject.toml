@@ -17,6 +17,7 @@ dev = ["pytest>=8,<9", "cryptography>=43,<49", "ruff>=0.11,<1", "build>=1,<2"]
 
 [project.scripts]
 mower-relay-server = "mower_relay_server.server:main"
+mower-relay-admin-ui = "mower_relay_server.admin_ui:main"
 mower-relay-admin = "mower_relay_server.admin:main"
 
 [project.urls]
@@ -26,7 +27,7 @@ Repository = "https://github.com/ArkMowers/mower-relay-server"
 include = ["mower_relay_server*"]
 
 [tool.setuptools.package-data]
-mower_relay_server = ["initializing.html"]
+mower_relay_server = ["initializing.html", "admin_ui.html", "admin_ui.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
