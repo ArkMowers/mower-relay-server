@@ -46,6 +46,27 @@ def test_generic_proxy_and_local_management_paths_are_absent(method, path):
     assert not allowed_request(method, path)
 
 
+def test_conversation_routes_match_only_the_supported_operations():
+    item = "/ai/conversations/" + "a" * 32
+    routes = {
+        "/ai/conversations": {"GET", "DELETE"},
+        item: {"GET", "DELETE"},
+        item + "/summary": {"POST"},
+        item + "/turns/12/control": {"POST"},
+        item + "/turns/x/control": set(),
+        item + "/turns/12": set(),
+        item + "/settings": set(),
+        "/ai/conversations/unknown": set(),
+        "/ai/attachments": set(),
+    }
+    for path, allowed in routes.items():
+        assert {
+            m
+            for m in ("GET", "POST", "DELETE", "PUT", "PATCH")
+            if allowed_request(m, path)
+        } == allowed
+
+
 def test_relay_rejects_remote_web_content_and_oversized_responses():
     for mime, content in (
         ("text/html", b"<html>other site</html>"),
