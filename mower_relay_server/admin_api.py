@@ -20,22 +20,9 @@ from mower_relay_server.protocol import (
 )
 
 
-def create_admin_app(gateway, token, entry):
+def install_admin_routes(app, gateway, token, entry):
     if not isinstance(token, str) or len(token) < 32:
         raise ValueError("管理 API 密钥至少需要 32 个字符")
-
-    @web.middleware
-    async def authorize(request, handler):
-        if request.host.lower() != f"{DOMAIN}:{PORT}":
-            raise web.HTTPNotFound()
-        supplied = request.headers.get("Authorization", "")
-        if not hmac.compare_digest(supplied.encode(), f"Bearer {token}".encode()):
-            raise web.HTTPForbidden()
-        response = await handler(request.clone(client_max_size=4096))
-        response.headers["Cache-Control"] = "no-store"
-        return response
-
-    app = web.Application(client_max_size=4096, middlewares=[authorize])
 
     def summary(name, record):
         peer = gateway.peers.get(name)
@@ -47,8 +34,7 @@ def create_admin_app(gateway, token, entry):
             "url": public_origin(name),
         }
 
-    async def get_user(request):
-        name = request.match_info["name"]
+    async def get_user(request, name):
         record = gateway.users().get(name)
         if not isinstance(record, dict) or not valid_subdomain(name):
             raise web.HTTPNotFound()
@@ -104,8 +90,7 @@ def create_admin_app(gateway, token, entry):
             status=201,
         )
 
-    async def update_user(request, *, rename_to_new):
-        name = request.match_info["name"]
+    async def update_user(request, name, *, rename_to_new):
         if not valid_subdomain(name):
             raise web.HTTPNotFound()
         body = {}
@@ -144,11 +129,11 @@ def create_admin_app(gateway, token, entry):
                 await peer.ws.close()
         return web.json_response(summary(target, record))
 
-    async def rename_user(request):
-        return await update_user(request, rename_to_new=True)
+    async def rename_user(request, name):
+        return await update_user(request, name, rename_to_new=True)
 
-    async def revoke_user(request):
-        return await update_user(request, rename_to_new=False)
+    async def revoke_user(request, name):
+        return await update_user(request, name, rename_to_new=False)
 
     async def manage_entry(request):
         if request.method == "PUT":
@@ -165,11 +150,32 @@ def create_admin_app(gateway, token, entry):
         await asyncio.to_thread(initialize_registry, gateway.registry)
 
     app.on_startup.append(initialize)
-    app.router.add_get("/entry", manage_entry)
-    app.router.add_put("/entry", manage_entry)
-    app.router.add_get("/users", list_users)
-    app.router.add_get("/users/{name}", get_user)
-    app.router.add_post("/users", issue_user)
-    app.router.add_post("/users/{name}/rename", rename_user)
-    app.router.add_post("/users/{name}/revoke", revoke_user)
-    return app
+    routes = web.UrlDispatcher()
+    routes.add_get("/entry", manage_entry)
+    routes.add_put("/entry", manage_entry)
+    routes.add_get("/users", list_users)
+    routes.add_post("/users", issue_user)
+    routes.add_get("/users/{name}", get_user)
+    routes.add_post("/users/{name}/rename", rename_user)
+    routes.add_post("/users/{name}/revoke", revoke_user)
+    routes.freeze()
+
+    async def dispatch(request):
+        if not request.path.startswith(entry.path):
+            return await gateway.handle(request)
+        suffix = request.path[len(entry.path) - 1 :]
+        url = request.rel_url.with_path(suffix).with_query(request.rel_url.query)
+        api_request = request.clone(rel_url=url, client_max_size=4096)
+        match = await routes.resolve(api_request)
+        if request.host.lower() != f"{DOMAIN}:{PORT}":
+            if match.http_exception is not None:
+                return await gateway.handle(request)
+            raise web.HTTPNotFound()
+        if match.http_exception is not None:
+            raise match.http_exception
+        supplied = request.headers.get("Authorization", "")
+        if not hmac.compare_digest(supplied.encode(), f"Bearer {token}".encode()):
+            raise web.HTTPForbidden()
+        return await match.handler(api_request, **match)
+
+    app.router.add_route("*", "/{path:.*}", dispatch)

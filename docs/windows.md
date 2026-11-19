@@ -48,23 +48,26 @@ Windows 防火墙仅需允许公网入站 TCP 58000，服务不再监听 58001�
 
 ## 3. QQBot 管理 API
 
-bot 部署在另一台机器，通过 `https://free.mower.work:58000/admin/` 调用管理 API。管理操作、用户网页和 Mower 连接由同一个 HTTPS 服务处理，共用公网 TCP 58000。管理请求仅接受主域名，用户子域名下的 `/admin/` 返回 404。
+bot 部署在另一台机器，通过当前管理入口调用 API，默认地址为 `https://free.mower.work:58000/admin/`。管理操作、用户网页和 Mower 连接由同一个 HTTPS 服务处理，共用公网 TCP 58000。管理请求仅接受主域名，用户子域名下的管理 API 返回 404。
 
-将中转机 `.\data\admin-token.txt` 中的管理密钥通过可信渠道配置为 bot 机器上的环境变量 `MOWER_RELAY_ADMIN_TOKEN`。所有请求携带 `Authorization: Bearer <管理密钥>`，不写进公开源码或群聊。以下示例在 bot 机器运行，始终校验 HTTPS 证书：
+将中转机 `.\data\admin-token.txt` 中的管理密钥通过可信渠道配置为 bot 机器上的环境变量 `MOWER_RELAY_ADMIN_TOKEN`。如果修改过管理入口，在 bot 机器上把 `MOWER_RELAY_ADMIN_PATH` 设为新路径。所有请求携带 `Authorization: Bearer <管理密钥>`，不写进公开源码或群聊。以下示例在 bot 机器运行，始终校验 HTTPS 证书：
 
 ```powershell
 $RelayAdminToken = $env:MOWER_RELAY_ADMIN_TOKEN
+$RelayPath = $env:MOWER_RELAY_ADMIN_PATH
+if (-not $RelayPath) { $RelayPath = "/admin/" }
+$RelayUsers = "https://free.mower.work:58000/" + $RelayPath.Trim("/") + "/users"
 $RelayHeaders = @{ Authorization = "Bearer $RelayAdminToken" }
 $RelayBody = @{ subdomain = "alice"; subject = "qq:123456789" } | ConvertTo-Json
-$IssuedUser = Invoke-RestMethod -Method Post -Uri https://free.mower.work:58000/admin/users -Headers $RelayHeaders -ContentType application/json -Body $RelayBody
+$IssuedUser = Invoke-RestMethod -Method Post -Uri $RelayUsers -Headers $RelayHeaders -ContentType application/json -Body $RelayBody
 ```
 
 签发结果包含 `subdomain`、`subject`、`enabled`、`connected`、`url` 和仅本次返回的 `credential`。bot 将凭据交付给已审核用户，避免群聊公开。发生超时不能假定签发没有生效：先查询，再由管理员决定吊销并重新签发，不能覆盖已有启用用户。
 
 ```powershell
-Invoke-RestMethod -Uri https://free.mower.work:58000/admin/users/alice -Headers $RelayHeaders
-Invoke-RestMethod -Uri 'https://free.mower.work:58000/admin/users?subject=qq%3A123456789&offset=0&limit=20' -Headers $RelayHeaders
-Invoke-RestMethod -Method Post -Uri https://free.mower.work:58000/admin/users/alice/revoke -Headers $RelayHeaders
+Invoke-RestMethod -Uri "$RelayUsers/alice" -Headers $RelayHeaders
+Invoke-RestMethod -Uri "${RelayUsers}?subject=qq%3A123456789&offset=0&limit=20" -Headers $RelayHeaders
+Invoke-RestMethod -Method Post -Uri "$RelayUsers/alice/revoke" -Headers $RelayHeaders
 ```
 
 HTTP 403 表示管理密钥无效；400 表示输入无效；404 表示用户不存在；409 表示名称或外部用户标识已占用。查询不返回凭据原值及其摘要。管理 API 不负责识别 QQ 用户或判断是否通过审核，bot 必须在调用前执行自己的身份与审核规则。
@@ -81,7 +84,7 @@ HTTP 403 表示管理密钥无效；400 表示输入无效；404 表示用户不
 1. 用户在本机 Mower 设置的“免费 Mower 中转”填写获批名称、独立凭据、用户名和非空密码，点击“保存并应用”。浏览器原生认证支持 UTF-8，用户名不能包含冒号。用户名和密码只在本机配置，管理员无需代为设置。通过多开管理器设置固定实例 token，或使用本次本机浏览器地址中的实例 token。
 2. 状态显示连接成功后，打开 `https://alice.free.mower.work:58000`。先通过本地用户名、密码验证，再在 Mower 页面填写实例 token。刷新页面、日志订阅及 AI WebSocket 应保留正常行为。浏览器安全 Cookie 要求 HTTPS；不要改成公网 HTTP 测试。
 3. 验证未知凭据、其他用户的子域名、重复连接和未登录 API 请求都被拒绝；密码正确但 token 缺失或错误时，实例操作仍被拒绝。
-4. 从异机 bot 经 `https://free.mower.work:58000/admin/` 签发、查询和吊销，确认吊销关闭当前连接，原页面无法继续操作，原凭据不能重新连接。检查错误或缺失管理密钥返回 403，用户子域名下的管理路径返回 404；58001、58002、7001、7501 及原转发端口没有被误暴露。
+4. 从异机 bot 经当前管理入口签发、查询和吊销，确认吊销关闭当前连接，原页面无法继续操作，原凭据不能重新连接。检查错误或缺失管理密钥返回 403，用户子域名下的管理路径返回 404；58001、58002、7001、7501 及原转发端口没有被误暴露。
 5. 验证 HTTPS 页面和 WSS 连接的证书链，续签重启后检查新证书的有效期；确认网关未记录账号密码、token 查询参数或管理密钥。网关仅暂存转发内容；不要在其前面加记录请求体或 Authorization 的调试代理。
 
 从独立中转仓库根目录运行服务端测试：

@@ -8,9 +8,15 @@ from importlib.resources import files
 from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from mower_relay_server.protocol import DOMAIN, PORT, valid_subdomain
+from mower_relay_server.protocol import (
+    DEFAULT_ENTRY,
+    DOMAIN,
+    PORT,
+    entry_path,
+    valid_subdomain,
+)
 
-API = f"https://{DOMAIN}:{PORT}/admin"
+API = f"https://{DOMAIN}:{PORT}"
 PAGE_SIZE = 25
 ASSETS = {
     "/": ("admin_ui.html", "text/html; charset=utf-8"),
@@ -75,7 +81,7 @@ def gateway_request(method, suffix, body, auth):
         messages = {
             400: "网关拒绝了输入，请检查子域名和用户标识",
             403: "管理密钥无效，请重新输入",
-            404: "未找到该凭据或管理接口，请刷新列表",
+            404: "请核对管理入口路径和凭据名称",
             409: "名称或用户归属发生冲突，请刷新列表",
             429: "请求过于频繁，请稍后重试",
         }
@@ -147,7 +153,9 @@ class AdminPage(BaseHTTPRequestHandler):
                 or self.headers.get_content_type() != "application/json"
             ):
                 raise ValueError("请求格式无效")
-            method, suffix, body = operation(json.loads(self.rfile.read(size)))
+            data = json.loads(self.rfile.read(size))
+            method, suffix, body = operation(data)
+            suffix = entry_path(data.get("entry", DEFAULT_ENTRY)).rstrip("/") + suffix
         except (ValueError, UnicodeError) as exc:
             self.respond(400, {"error": str(exc)})
             return

@@ -349,6 +349,14 @@
         <h1>中转凭据管理</h1>
         <p class="muted">输入网关管理密钥。关闭或刷新页面后需重新输入。</p>
         <form id="loginForm">
+          <label id="gatewayPathField" hidden
+            >管理入口路径<input
+              id="gatewayPath"
+              value="/admin/"
+              maxlength="128"
+              autocomplete="off"
+              spellcheck="false"
+          /></label>
           <label
             >管理密钥<input id="key" type="password" autocomplete="off" required autofocus
           /></label>
@@ -425,7 +433,7 @@
         <h2 id="entryTitle">管理入口</h2>
         <p class="muted" id="entryHelp"></p>
         <label
-          >网页入口路径<input
+          >网页和 API 的入口路径<input
             id="entryPath"
             placeholder="/ops-mower/"
             maxlength="128"

@@ -10,11 +10,12 @@ let mode = ''
 let selected = null
 
 const hosted = location.pathname !== '/'
+$('gatewayPathField').hidden = hosted
 let originalEntry = ''
 
 function apiCall(data) {
-  if (!hosted) return ['/api', 'POST', data]
-  const users = '/admin/users'
+  if (!hosted) return ['/api', 'POST', { ...data, entry: $('gatewayPath').value.trim() }]
+  const users = location.pathname + 'users'
   const subject = data.subject
   switch (data.action) {
     case 'list':
@@ -30,9 +31,9 @@ function apiCall(data) {
     case 'revoke':
       return [users + '/' + encodeURIComponent(data.subdomain) + '/revoke', 'POST', { subject }]
     case 'get_entry':
-      return ['/admin/entry', 'GET']
+      return [location.pathname + 'entry', 'GET']
     case 'set_entry':
-      return ['/admin/entry', 'PUT', { original: data.original, path: data.path }]
+      return [location.pathname + 'entry', 'PUT', { original: data.original, path: data.path }]
     default:
       throw new Error('不支持的操作')
   }
@@ -167,7 +168,6 @@ function logout() {
   users = []
   selected = null
   $('key').value = $('secret').value = ''
-  $('loginForm').reset()
   $('editForm').reset()
   for (const id of ['editor', 'issued', 'entryDialog']) if ($(id).open) $(id).close()
   for (const id of [
@@ -287,7 +287,8 @@ $('entry').onclick = () =>
     originalEntry = data.path
     $('entryPath').value = data.path
     $('entryError').textContent = ''
-    $('entryHelp').textContent = '保存后旧网页入口立即关闭。管理 API 地址保持不变。'
+    $('entryHelp').textContent =
+      '保存后网页和管理 API 将立即切换。请同步更新 bot 和其他本机工具的入口路径。'
     $('entryDialog').showModal()
     $('entryPath').focus()
   })
@@ -304,6 +305,7 @@ $('entryForm').onsubmit = (event) => {
       path: $('entryPath').value.trim(),
     })
     if (hosted) history.replaceState(null, '', result.path)
+    else $('gatewayPath').value = result.path
     $('entryDialog').close()
     $('message').textContent = '管理入口已保存：' + 'https://free.mower.work:58000' + result.path
   })
