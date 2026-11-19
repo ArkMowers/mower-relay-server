@@ -1,10 +1,16 @@
 """通过主域名 HTTPS 入口供异机 bot 调用的独立鉴权管理 API。"""
 
+import asyncio
 import hmac
 
 from aiohttp import web
 
-from mower_relay_server.admin import issue, revoke, write_json
+from mower_relay_server.admin import (
+    RegistryConflict,
+    initialize_registry,
+    issue,
+    revoke,
+)
 from mower_relay_server.protocol import (
     DOMAIN,
     PORT,
@@ -85,19 +91,15 @@ def create_admin_app(gateway, token):
             or not 1 <= len(subject) <= 128
         ):
             raise web.HTTPBadRequest()
-        users = gateway.users()
-        if any(
-            record.get("subject") == subject and record.get("enabled")
-            for record in users.values()
-            if isinstance(record, dict)
-        ):
-            raise web.HTTPConflict(text="该用户已有启用的子域名")
         try:
-            credential = issue(gateway.registry, name, subject=subject)
-        except ValueError:
-            raise web.HTTPConflict(text="子域名已经启用") from None
+            credential = await asyncio.to_thread(issue, gateway.registry, name, subject)
+        except RegistryConflict as exc:
+            raise web.HTTPConflict(text=str(exc)) from None
         return web.json_response(
-            {**summary(name, gateway.users()[name]), "credential": credential},
+            {
+                **summary(name, {"subject": subject, "enabled": True}),
+                "credential": credential,
+            },
             status=201,
         )
 
@@ -105,15 +107,14 @@ def create_admin_app(gateway, token):
         name = request.match_info["name"]
         if name not in gateway.users() or not valid_subdomain(name):
             raise web.HTTPNotFound()
-        revoke(gateway.registry, name)
+        await asyncio.to_thread(revoke, gateway.registry, name)
         peer = gateway.peers.get(name)
         if peer:
             await peer.ws.close()
         return web.json_response(summary(name, gateway.users()[name]))
 
     async def initialize(app):
-        if not gateway.registry.exists():
-            write_json(gateway.registry, {})
+        await asyncio.to_thread(initialize_registry, gateway.registry)
 
     app.on_startup.append(initialize)
     app.router.add_get("/users", list_users)

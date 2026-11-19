@@ -609,3 +609,35 @@ def test_gateway_rejects_concurrency_and_traffic_excess_before_dispatch(tmp_path
             gateway.peers.clear()
 
     asyncio.run(scenario())
+
+
+def test_concurrent_admin_processes_issue_a_subdomain_once(tmp_path):
+    import subprocess
+    import sys
+
+    registry = tmp_path / "users.json"
+    command = [
+        sys.executable,
+        "-m",
+        "mower_relay_server.admin",
+        "--registry",
+        str(registry),
+        "issue",
+        "trial",
+    ]
+    processes = [
+        subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        for _ in range(8)
+    ]
+    results = [process.communicate(timeout=30) for process in processes]
+    issued = [
+        out.strip()
+        for process, (out, _) in zip(processes, results)
+        if process.returncode == 0
+    ]
+    assert len(issued) == 1
+    for process, (_, err) in zip(processes, results):
+        if process.returncode:
+            assert b"RegistryConflict" in err
+    record = json.loads(registry.read_bytes())["trial"]
+    assert record["credential_sha256"] == hashlib.sha256(issued[0]).hexdigest()
