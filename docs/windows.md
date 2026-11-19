@@ -5,16 +5,15 @@
 ## 1. 准备文件与证书
 
 1. 在 Windows 将独立中转仓库克隆到自行选择的工作目录，安装 Python 3.12。以下命令从仓库根目录运行；启动脚本将当前目录切换到其所在目录，不指定固定磁盘位置。
-2. 在构建机从支持协议 v1 的 Mower 对应版本发布包中取得 `ui/dist`，复制到独立的 `.\ui-dist`。该目录只放可发布的前端文件，不放账号文件、注册文件、证书或管理密钥；不要将整个工作目录作为静态目录。前端构建在发布环境执行 `npm ci`、`npm run build`。
-3. 将该版本资源包的前端图片合并到相同目录。将 `ui/dist/pages/basement_skill` 的文件复制到 `.\ui-dist\basement_skill`，并将同版本 `arknights_mower/data/building_skill.json` 复制为其中的 `skill.json`，用于服务端提供基建技能静态数据。资源升级时同步这些文件。
-4. DNS 中将 `free.mower.work` 和 `*.free.mower.work` 指向该 Windows 主机。检查已签发证书的 Subject Alternative Name 同时覆盖两者；`*.mower.work` 不能覆盖 `用户.free.mower.work`。保留现有自动签发任务，续签后重启中转服务加载新证书。
+2. 按 [R2 配置](r2.md) 发布静态前端。
+3. DNS 中将 `free.mower.work` 和 `*.free.mower.work` 指向该 Windows 主机。检查已签发证书的 Subject Alternative Name 同时覆盖两者；`*.mower.work` 不能覆盖 `用户.free.mower.work`。保留现有自动签发任务，续签后重启中转服务加载新证书。
 
 ```powershell
 py -3.12 -m venv .relay-venv
 .\.relay-venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-服务端只需要本仓库及网关依赖，不需要复制 Mower 主仓或安装其 Python 包、游戏识别及桌面依赖。前端文件和资源在构建机准备后复制到服务器；服务运行时不读取 Mower 源码。
+服务端只需要本仓库及网关依赖，不需要复制 Mower 主仓或安装其 Python 包、游戏识别及桌面依赖。
 
 ## 2. 使用证书启动 HTTPS 服务
 
@@ -45,9 +44,7 @@ py -3.12 -m venv .relay-venv
 
 Windows 防火墙仅需允许公网入站 TCP 58000，服务不再监听 58001、58002。服务不需要开放 frps 的 7001、7501 或 TCP 65000 至 65100。若原 frps 仅为该免费服务准备，停止该服务并撤销相应入站规则；若另有用途，则单独维护，不能继续开放匿名通用隧道后宣称免费入口仅供 Mower 使用。
 
-带构建标识的客户端从随包的 `ui/dist/relay-ui.json` 读取标识。浏览器认证后，网关从 ArkMowers 官方 GitHub Release 按需下载对应构建，入口为固定的 `relay-ui` 发布。下载、校验和解压进度显示在实例页面；准备好后自动进入 Mower。管理员预装的 `ui-dist` 继续供旧协议客户端使用。
-
-网关在工作目录的 `relay-ui-cache` 中复用已下载的构建。默认容量为 256 MiB，一次下载一个包，为下载和解压预留空间，空间紧张时先回收最久未使用的离线版本。在线实例持有的版本继续保留。官方构建尚未发布、连接失败或缓存不足时，页面说明原因并提供重试。更新 Mower 仍通过实例原有的正式版、公测版和开发版通道进行。
+浏览器直接加载实例对应的 R2 前端，网关提供登录和数据通信。
 
 ## 3. QQBot 管理 API
 

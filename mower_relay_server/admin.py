@@ -6,6 +6,7 @@ import json
 import os
 import secrets
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from mower_relay_server.protocol import valid_subdomain
@@ -22,26 +23,83 @@ def write_json(path, value):
         Path(temporary).unlink(missing_ok=True)
 
 
+@contextmanager
+def registry_lock(path):
+    # users.json is atomically replaced. Lock a stable sibling across processes.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.with_name(path.name + ".lock").open("a+b") as lock:
+        if os.name == "nt":
+            import msvcrt
+
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        yield  # Closing the descriptor releases the lock on both platforms.
+
+
+def initialize_registry(path):
+    with registry_lock(path):
+        if not path.exists():
+            write_json(path, {})
+
+
+class RegistryConflict(ValueError):
+    pass
+
+
 def issue(path, subdomain, subject=""):
     if not valid_subdomain(subdomain):
         raise ValueError("子域名格式无效")
-    users = json.loads(path.read_text("utf-8")) if path.exists() else {}
-    if subdomain in users and users[subdomain].get("enabled"):
-        raise ValueError("该子域名已启用；请先吊销原凭据")
-    credential = secrets.token_urlsafe(48)
-    users[subdomain] = {
-        "enabled": True,
-        "subject": subject,
-        "credential_sha256": hashlib.sha256(credential.encode()).hexdigest(),
-    }
-    write_json(path, users)
+    with registry_lock(path):
+        users = json.loads(path.read_text("utf-8")) if path.exists() else {}
+        if subdomain in users and users[subdomain].get("enabled"):
+            raise RegistryConflict("该子域名已启用；请先吊销原凭据")
+        if subject and any(
+            record.get("enabled") and record.get("subject") == subject
+            for record in users.values()
+            if isinstance(record, dict)
+        ):
+            raise RegistryConflict("该用户已有启用的子域名")
+        credential = secrets.token_urlsafe(48)
+        users[subdomain] = {
+            "enabled": True,
+            "subject": subject,
+            "credential_sha256": hashlib.sha256(credential.encode()).hexdigest(),
+        }
+        write_json(path, users)
     return credential
 
 
-def revoke(path, subdomain):
-    users = json.loads(path.read_text("utf-8"))
-    users[subdomain]["enabled"] = False
-    write_json(path, users)
+def rename(path, old_name, new_name, subject=None):
+    if not valid_subdomain(old_name) or not valid_subdomain(new_name):
+        raise ValueError("子域名格式无效")
+    with registry_lock(path):
+        users = json.loads(path.read_text("utf-8"))
+        record = users[old_name]
+        if subject is not None and record.get("subject", "") != subject:
+            raise RegistryConflict("原子域名已不属于该用户")
+        if not record.get("enabled"):
+            raise RegistryConflict("该凭据已吊销")
+        if new_name != old_name:
+            if users.get(new_name, {}).get("enabled"):
+                raise RegistryConflict("新子域名已被占用")
+            users[new_name] = users.pop(old_name)
+            write_json(path, users)
+        return record
+
+
+def revoke(path, subdomain, subject=None):
+    with registry_lock(path):
+        users = json.loads(path.read_text("utf-8"))
+        record = users[subdomain]
+        if subject is not None and record.get("subject", "") != subject:
+            raise RegistryConflict("子域名已不属于该用户")
+        record["enabled"] = False
+        write_json(path, users)
+        return record
 
 
 def main():

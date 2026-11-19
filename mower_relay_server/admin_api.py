@@ -1,10 +1,17 @@
 """通过主域名 HTTPS 入口供异机 bot 调用的独立鉴权管理 API。"""
 
+import asyncio
 import hmac
 
 from aiohttp import web
 
-from mower_relay_server.admin import issue, revoke, write_json
+from mower_relay_server.admin import (
+    RegistryConflict,
+    initialize_registry,
+    issue,
+    rename,
+    revoke,
+)
 from mower_relay_server.protocol import (
     DOMAIN,
     PORT,
@@ -36,7 +43,7 @@ def create_admin_app(gateway, token):
             "subdomain": name,
             "subject": record.get("subject", ""),
             "enabled": record.get("enabled") is True,
-            "connected": bool(peer and not peer.ws.closed),
+            "connected": bool(peer and peer.ui_build and not peer.ws.closed),
             "url": public_origin(name),
         }
 
@@ -85,39 +92,71 @@ def create_admin_app(gateway, token):
             or not 1 <= len(subject) <= 128
         ):
             raise web.HTTPBadRequest()
-        users = gateway.users()
-        if any(
-            record.get("subject") == subject and record.get("enabled")
-            for record in users.values()
-            if isinstance(record, dict)
-        ):
-            raise web.HTTPConflict(text="该用户已有启用的子域名")
         try:
-            credential = issue(gateway.registry, name, subject=subject)
-        except ValueError:
-            raise web.HTTPConflict(text="子域名已经启用") from None
+            credential = await asyncio.to_thread(issue, gateway.registry, name, subject)
+        except RegistryConflict as exc:
+            raise web.HTTPConflict(text=str(exc)) from None
         return web.json_response(
-            {**summary(name, gateway.users()[name]), "credential": credential},
+            {
+                **summary(name, {"subject": subject, "enabled": True}),
+                "credential": credential,
+            },
             status=201,
         )
 
-    async def revoke_user(request):
+    async def update_user(request, *, rename_to_new):
         name = request.match_info["name"]
-        if name not in gateway.users() or not valid_subdomain(name):
+        if not valid_subdomain(name):
             raise web.HTTPNotFound()
-        revoke(gateway.registry, name)
-        peer = gateway.peers.get(name)
-        if peer:
-            await peer.ws.close()
-        return web.json_response(summary(name, gateway.users()[name]))
+        body = {}
+        if request.can_read_body:
+            try:
+                body = await request.json()
+            except ValueError:
+                raise web.HTTPBadRequest() from None
+        fields = {"subject", "subdomain"} if rename_to_new else {"subject"}
+        if not isinstance(body, dict) or set(body) - fields:
+            raise web.HTTPBadRequest(text="管理请求字段无效")
+        subject = body.get("subject")
+        if "subject" in body and (not isinstance(subject, str) or len(subject) > 128):
+            raise web.HTTPBadRequest(text="subject 无效")
+        target = body.get("subdomain") if rename_to_new else name
+        if not valid_subdomain(target):
+            raise web.HTTPBadRequest(text="需要有效的新子域名 subdomain")
+        try:
+            if rename_to_new:
+                record = await asyncio.to_thread(
+                    rename, gateway.registry, name, target, subject
+                )
+            else:
+                record = await asyncio.to_thread(
+                    revoke, gateway.registry, name, subject
+                )
+        except KeyError:
+            raise web.HTTPNotFound(text="子域名不存在") from None
+        except RegistryConflict as exc:
+            raise web.HTTPConflict(text=str(exc)) from None
+        except (OSError, ValueError):
+            raise web.HTTPServiceUnavailable(text="注册文件不可用") from None
+        if target != name or not rename_to_new:
+            peer = gateway.peers.get(name)
+            if peer and peer.credential_digest == record["credential_sha256"]:
+                await peer.ws.close()
+        return web.json_response(summary(target, record))
+
+    async def rename_user(request):
+        return await update_user(request, rename_to_new=True)
+
+    async def revoke_user(request):
+        return await update_user(request, rename_to_new=False)
 
     async def initialize(app):
-        if not gateway.registry.exists():
-            write_json(gateway.registry, {})
+        await asyncio.to_thread(initialize_registry, gateway.registry)
 
     app.on_startup.append(initialize)
     app.router.add_get("/users", list_users)
     app.router.add_get("/users/{name}", get_user)
     app.router.add_post("/users", issue_user)
+    app.router.add_post("/users/{name}/rename", rename_user)
     app.router.add_post("/users/{name}/revoke", revoke_user)
     return app

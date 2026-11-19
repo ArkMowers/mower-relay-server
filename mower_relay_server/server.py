@@ -7,11 +7,13 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import ssl
 import time
 from collections import OrderedDict
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from aiohttp import WSMsgType, web
@@ -34,7 +36,9 @@ from mower_relay_server.protocol import (
     valid_subdomain,
     validate_response,
 )
-from mower_relay_server.ui_cache import BUILD, UiCache
+
+BUILD = re.compile(r"[a-f0-9]{64}")
+DEFAULT_UI_ORIGIN = "https://mower.231240092.xyz"
 
 BASIC_CHALLENGE = 'Basic realm="Mower", charset="UTF-8"'
 
@@ -60,7 +64,8 @@ def html_navigation(request):
 
 
 class Peer:
-    def __init__(self, ws):
+    def __init__(self, ws, credential_digest):
+        self.credential_digest = credential_digest
         self.ws = ws
         self.generation = secrets.token_hex(16)
         self.pending = {}
@@ -71,7 +76,6 @@ class Peer:
         self.requests = 0
         self.inflight = 0
         self.ui_build = None
-        self.ui_pages = None
 
     def charge(self, size):
         now = time.monotonic()
@@ -103,23 +107,26 @@ class Peer:
 
 
 class Gateway:
-    def __init__(self, registry, ui, session_key):
+    def __init__(self, registry, session_key, ui_origin):
         self.registry = Path(registry)
-        self.ui = Path(ui).resolve()
         if len(session_key) < 32:
             raise ValueError("网关会话密钥至少需要 32 个字符")
         self.signer = URLSafeTimedSerializer(session_key, salt="mower-relay-v1")
         self.peers = {}
-        self.cache = UiCache(
-            self.ui.parent / "relay-ui-cache",
-            lambda: {peer.ui_build for peer in self.peers.values()},
-        )
+        origin = urlsplit(ui_origin)
+        if (
+            origin.scheme != "https"
+            or not origin.hostname
+            or origin.username is not None
+            or origin.path not in {"", "/"}
+            or origin.query
+            or origin.fragment
+            or not re.fullmatch(r"[a-zA-Z0-9.-]+(?::[0-9]+)?", origin.netloc)
+        ):
+            raise ValueError("前端地址须为 HTTPS 域名")
+        self.ui_origin = f"https://{origin.netloc}"
+        self.shell = INITIALIZING.read_text("utf-8")
         self.failures = OrderedDict()
-        manifest = self.ui / "frontend-routes.json"
-        self.pages = {
-            path.rstrip("/").lower() or "/"
-            for path in json.loads(manifest.read_text("utf-8"))
-        }
 
     def users(self):
         try:
@@ -130,16 +137,11 @@ class Gateway:
             raise web.HTTPServiceUnavailable()
         return data
 
-    def admitted(self, name, credential=None):
+    def admitted(self, name):
         record = self.users().get(name)
         if not isinstance(record, dict) or record.get("enabled") is not True:
             raise web.HTTPForbidden()
-        expected = record.get("credential_sha256", "")
-        if credential is not None and not hmac.compare_digest(
-            hashlib.sha256(credential.encode()).hexdigest(), expected
-        ):
-            raise web.HTTPForbidden()
-        return expected
+        return record["credential_sha256"]
 
     def tenant(self, request):
         host = request.host.lower()
@@ -149,12 +151,17 @@ class Gateway:
         name = host[: -len(suffix)]
         if not valid_subdomain(name):
             raise web.HTTPNotFound()
-        self.admitted(name)
         return name
 
     def peer(self, name):
+        digest = self.admitted(name)
         peer = self.peers.get(name)
-        if peer is None or peer.ws.closed:
+        if (
+            peer is None
+            or peer.credential_digest != digest
+            or peer.ws.closed
+            or not peer.ui_build
+        ):
             raise web.HTTPServiceUnavailable(text="Mower 实例未连接")
         return peer
 
@@ -172,18 +179,26 @@ class Gateway:
     async def connect(self, request):
         if request.host.lower() != f"{DOMAIN}:{PORT}":
             raise web.HTTPNotFound()
-        name = request.headers.get("X-Mower-Subdomain", "")
-        if not valid_subdomain(name):
-            raise web.HTTPForbidden()
         header = request.headers.get("Authorization", "")
-        if not header.startswith("Bearer ") or len(header) > 512:
+        if not header.startswith("Bearer ") or not 7 < len(header) <= 512:
             raise web.HTTPForbidden()
-        digest = self.admitted(name, header[7:])
+        digest = hashlib.sha256(header[7:].encode()).hexdigest()
+        matches = [
+            name
+            for name, record in self.users().items()
+            if valid_subdomain(name)
+            and isinstance(record, dict)
+            and record.get("enabled") is True
+            and hmac.compare_digest(digest, record.get("credential_sha256", ""))
+        ]
+        if len(matches) != 1:
+            raise web.HTTPForbidden()
+        name = matches[0]
         if name in self.peers:
             raise web.HTTPConflict(text="实例已经连接")
         # Reserve the domain before the first await to prevent duplicate admission.
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=MAX_FRAME, compress=False)
-        peer = Peer(ws)
+        peer = Peer(ws, digest)
         self.peers[name] = peer
         try:
             await ws.prepare(request)
@@ -194,13 +209,18 @@ class Gateway:
                 or hello.get("version") != VERSION
             ):
                 raise ValueError("协议版本无效")
-            ready = {"op": "ready", "version": VERSION}
-            if "ui_build" in hello:
-                build = hello["ui_build"]
-                if not isinstance(build, str) or not BUILD.fullmatch(build):
-                    raise ValueError("前端构建标识无效")
-                peer.ui_build = ready["ui_build"] = build
-            await ws.send_json(ready)
+            build = hello.get("ui_build")
+            if not isinstance(build, str) or not BUILD.fullmatch(build):
+                raise ValueError("前端构建标识无效")
+            peer.ui_build = build
+            await ws.send_json(
+                {
+                    "op": "ready",
+                    "version": VERSION,
+                    "subdomain": name,
+                    "ui_build": build,
+                }
+            )
             async for frame in ws:
                 if frame.type != WSMsgType.TEXT:
                     break
@@ -305,9 +325,7 @@ class Gateway:
         if self.authenticated(request, name, peer):
             return await self.serve(request, name, peer)
         if request.headers.get("Sec-Fetch-Site") == "cross-site" and not (
-            request.method == "GET"
-            and (request.path == "/" or request.path in self.pages)
-            and html_navigation(request)
+            request.method == "GET" and html_navigation(request)
         ):
             raise web.HTTPForbidden()
         origin = request.headers.get("Origin")
@@ -365,7 +383,8 @@ class Gateway:
                     {"op": "ws_open", "id": key, "path": request.path}
                 )
                 async for frame in socket:
-                    self.admitted(name)
+                    if self.peer(name) is not peer:
+                        break
                     if frame.type != WSMsgType.TEXT:
                         break
                     peer.charge(len(frame.data.encode()))
@@ -377,44 +396,18 @@ class Gateway:
                 if not peer.ws.closed:
                     await peer.ws.send_json({"op": "ws_close", "id": key})
             return socket
-        ui_root, pages = self.ui, self.pages
-        if peer.ui_build:
-            build = peer.ui_build
-            if request.path == "/__mower/ui-state" and request.method in {
-                "GET",
-                "POST",
-            }:
-                return web.json_response(
-                    self.cache.state(build, retry=request.method == "POST")
-                )
-            ui_root = self.cache.directory(build)
-            if not ui_root.is_dir():
-                if request.method == "GET" and (
-                    request.path == "/" or html_navigation(request)
-                ):
-                    self.cache.state(build)
-                    return web.FileResponse(INITIALIZING)
-                if not allowed_request(request.method, request.path_qs):
-                    raise web.HTTPServiceUnavailable(text="前端正在准备")
-            else:
-                if peer.ui_pages is None:
-                    os.utime(ui_root)
-                    peer.ui_pages = set(
-                        json.loads((ui_root / "frontend-routes.json").read_bytes())
-                    )
-                pages = peer.ui_pages
-        if request.method in {"GET", "HEAD"}:
-            if (
-                request.path == "/"
-                or request.path.rstrip("/").lower() in pages
-                and html_navigation(request)
-            ):
-                return web.FileResponse(ui_root / "index.html")
-            if not allowed_request(request.method, request.path):
-                path = (ui_root / request.path.lstrip("/")).resolve()
-                if path.is_relative_to(ui_root) and path.is_file():
-                    return web.FileResponse(path)
-                raise web.HTTPNotFound()
+        if request.method in {"GET", "HEAD"} and (
+            request.path == "/" or html_navigation(request)
+        ):
+            html = self.shell.replace("__BUILD__", peer.ui_build).replace(
+                "__UI_ORIGIN__", self.ui_origin
+            )
+            return web.Response(
+                text=html,
+                content_type="text/html",
+                headers={"Vary": "Accept, Sec-Fetch-Dest"},
+            )
+
         if not allowed_request(request.method, request.path_qs):
             raise web.HTTPNotFound()
         if peer.inflight >= MAX_PENDING:
@@ -453,8 +446,8 @@ class Gateway:
         return response
 
 
-def create_app(registry, ui, session_key, admin_token):
-    gateway = Gateway(registry, ui, session_key)
+def create_app(registry, ui, session_key, admin_token, *, ui_origin=DEFAULT_UI_ORIGIN):
+    gateway = Gateway(registry, session_key, ui_origin)
     traffic = OrderedDict()
 
     @web.middleware
@@ -493,8 +486,6 @@ def create_app(registry, ui, session_key, admin_token):
                 status=exc.status, text=exc.text, headers=exc.headers
             )
         if not response.prepared:
-            if request.path.rstrip("/").lower() in gateway.pages:
-                response.headers["Vary"] = "Accept, Sec-Fetch-Dest"
             response.headers.update(
                 {
                     "Cache-Control": "no-store",
@@ -512,7 +503,6 @@ def create_app(registry, ui, session_key, admin_token):
     app.router.add_route("*", "/{path:.*}", gateway.handle)
 
     async def shutdown(app):
-        await gateway.cache.close()
         await asyncio.gather(
             *(peer.ws.close() for peer in list(gateway.peers.values()))
         )
@@ -547,7 +537,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--work-dir", type=Path, default=Path.cwd())
     parser.add_argument("--registry", type=Path)
-    parser.add_argument("--ui", type=Path)
+    parser.add_argument("--ui", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--ui-origin")
     parser.add_argument("--session-key-file", type=Path)
     parser.add_argument("--admin-token-file", type=Path)
     parser.add_argument("--cert-file", type=Path)
@@ -568,6 +559,12 @@ def main():
         location(args.ui, "ui-dist"),
         read_or_create_secret(location(args.session_key_file, "data/session-key.txt")),
         read_or_create_secret(location(args.admin_token_file, "data/admin-token.txt")),
+        ui_origin=args.ui_origin
+        or (
+            (work_dir / "ui-origin.txt").read_text("utf-8-sig").strip()
+            if (work_dir / "ui-origin.txt").is_file()
+            else DEFAULT_UI_ORIGIN
+        ),
     )
     # 页面查询参数可能含实例 token，关闭访问日志。
     web.run_app(
