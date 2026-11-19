@@ -64,7 +64,8 @@ def html_navigation(request):
 
 
 class Peer:
-    def __init__(self, ws):
+    def __init__(self, ws, credential_digest):
+        self.credential_digest = credential_digest
         self.ws = ws
         self.generation = secrets.token_hex(16)
         self.pending = {}
@@ -150,12 +151,17 @@ class Gateway:
         name = host[: -len(suffix)]
         if not valid_subdomain(name):
             raise web.HTTPNotFound()
-        self.admitted(name)
         return name
 
     def peer(self, name):
+        digest = self.admitted(name)
         peer = self.peers.get(name)
-        if peer is None or peer.ws.closed or not peer.ui_build:
+        if (
+            peer is None
+            or peer.credential_digest != digest
+            or peer.ws.closed
+            or not peer.ui_build
+        ):
             raise web.HTTPServiceUnavailable(text="Mower 实例未连接")
         return peer
 
@@ -192,7 +198,7 @@ class Gateway:
             raise web.HTTPConflict(text="实例已经连接")
         # Reserve the domain before the first await to prevent duplicate admission.
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=MAX_FRAME, compress=False)
-        peer = Peer(ws)
+        peer = Peer(ws, digest)
         self.peers[name] = peer
         try:
             await ws.prepare(request)
@@ -377,7 +383,8 @@ class Gateway:
                     {"op": "ws_open", "id": key, "path": request.path}
                 )
                 async for frame in socket:
-                    self.admitted(name)
+                    if self.peer(name) is not peer:
+                        break
                     if frame.type != WSMsgType.TEXT:
                         break
                     peer.charge(len(frame.data.encode()))

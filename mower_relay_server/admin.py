@@ -73,11 +73,33 @@ def issue(path, subdomain, subject=""):
     return credential
 
 
-def revoke(path, subdomain):
+def rename(path, old_name, new_name, subject=None):
+    if not valid_subdomain(old_name) or not valid_subdomain(new_name):
+        raise ValueError("子域名格式无效")
     with registry_lock(path):
         users = json.loads(path.read_text("utf-8"))
-        users[subdomain]["enabled"] = False
+        record = users[old_name]
+        if subject is not None and record.get("subject", "") != subject:
+            raise RegistryConflict("原子域名已不属于该用户")
+        if not record.get("enabled"):
+            raise RegistryConflict("该凭据已吊销")
+        if new_name != old_name:
+            if users.get(new_name, {}).get("enabled"):
+                raise RegistryConflict("新子域名已被占用")
+            users[new_name] = users.pop(old_name)
+            write_json(path, users)
+        return record
+
+
+def revoke(path, subdomain, subject=None):
+    with registry_lock(path):
+        users = json.loads(path.read_text("utf-8"))
+        record = users[subdomain]
+        if subject is not None and record.get("subject", "") != subject:
+            raise RegistryConflict("子域名已不属于该用户")
+        record["enabled"] = False
         write_json(path, users)
+        return record
 
 
 def main():

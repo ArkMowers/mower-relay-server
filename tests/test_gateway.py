@@ -473,6 +473,7 @@ def test_admin_api_authentication_subject_queries_and_revocation(tmp_path, monke
                         ("get", "/admin/users/alice"),
                         ("post", "/admin/users"),
                         ("post", "/admin/users/alice/revoke"),
+                        ("post", "/admin/users/alice/rename"),
                     ):
                         assert (
                             await getattr(bot, method)(
@@ -524,9 +525,9 @@ def test_sessions_are_bound_to_tenant_and_connection_and_login_is_limited(tmp_pa
         app, registry, _ = fixture_gateway(tmp_path)
         issue(registry, "bob", subject="qq:bob")
         gateway = app[GATEWAY]
-        alice = Peer(Mock(closed=False))
+        alice = Peer(Mock(closed=False), gateway.admitted("alice"))
         alice.ui_build = "a" * 64
-        bob = Peer(Mock(closed=False))
+        bob = Peer(Mock(closed=False), gateway.admitted("bob"))
         bob.ui_build = "b" * 64
         gateway.peers.update(alice=alice, bob=bob)
         signed = gateway.signer.dumps(
@@ -544,7 +545,9 @@ def test_sessions_are_bound_to_tenant_and_connection_and_login_is_limited(tmp_pa
                         "/", headers={**headers, "Host": "bob.free.mower.work:58000"}
                     )
                 ).status == 401
-                gateway.peers["alice"] = Peer(Mock(closed=False))
+                gateway.peers["alice"] = Peer(
+                    Mock(closed=False), gateway.admitted("alice")
+                )
                 gateway.peers["alice"].ui_build = "a" * 64
                 assert (await browser.get("/", headers=headers)).status == 401
                 gateway.failures["alice"] = [asyncio.get_running_loop().time()] * 5
@@ -610,7 +613,7 @@ def test_gateway_rejects_concurrency_and_traffic_excess_before_dispatch(tmp_path
     async def scenario():
         app, _, _ = fixture_gateway(tmp_path)
         gateway = app[GATEWAY]
-        peer = Peer(Mock(closed=False))
+        peer = Peer(Mock(closed=False), gateway.admitted("alice"))
         peer.ui_build = "a" * 64
         gateway.peers["alice"] = peer
         signed = gateway.signer.dumps(
@@ -668,3 +671,70 @@ def test_concurrent_admin_processes_issue_a_subdomain_once(tmp_path):
             assert b"RegistryConflict" in err
     record = json.loads(registry.read_bytes())["trial"]
     assert record["credential_sha256"] == hashlib.sha256(issued[0]).hexdigest()
+
+
+def test_rename_keeps_credentials_and_moves_a_connected_agent(tmp_path):
+    async def scenario():
+        app, registry, credential = fixture_gateway(tmp_path)
+        issue(registry, "taken", subject="qq:other")
+        admin = {"Host": "free.mower.work:58000", "Authorization": "Bearer " + "a" * 48}
+        auth = {**admin, "Authorization": f"Bearer {credential}"}
+        hello = {"op": "hello", "version": 1, "ui_build": "a" * 64}
+        async with TestClient(TestServer(app)) as api:
+
+            async def change(name):
+                return await api.post(
+                    "/admin/users/alice/rename", headers=admin, json={"subdomain": name}
+                )
+
+            async with api.ws_connect("/__mower/connect", headers=auth) as old:
+                await old.send_json(hello)
+                assert (await old.receive_json())["subdomain"] == "alice"
+                before = registry.read_bytes()
+                for action, payload in (
+                    ("rename", {"subdomain": "new-name", "subject": "qq:other"}),
+                    ("revoke", {"subject": "qq:other"}),
+                ):
+                    response = await api.post(
+                        f"/admin/users/alice/{action}", headers=admin, json=payload
+                    )
+                    assert response.status == 409
+                assert (await change("admin")).status == 400
+                assert (await change("taken")).status == 409
+                assert (await (await change("alice")).json())["connected"]
+                assert registry.read_bytes() == before
+                gateway = app[GATEWAY]
+                cookie = gateway.signer.dumps(
+                    {"tenant": "alice", "connection": gateway.peers["alice"].generation}
+                )
+                task = asyncio.create_task(change("new-name"))
+                assert (await old.receive(timeout=3)).type == WSMsgType.CLOSE
+                response = await task
+                assert response.status == 200
+                assert await response.json() == {
+                    "subdomain": "new-name",
+                    "subject": "qq:alice",
+                    "enabled": True,
+                    "connected": False,
+                    "url": public_origin("new-name"),
+                }
+            records = json.loads(registry.read_bytes())
+            assert records["new-name"] == json.loads(before)["alice"]
+            assert "alice" not in records
+            headers = {
+                "Host": "alice.free.mower.work:58000",
+                "Cookie": f"{COOKIE}={cookie}",
+            }
+            assert (await api.get("/", headers=headers)).status == 403
+            async with api.ws_connect("/__mower/connect", headers=auth) as new:
+                await new.send_json(hello)
+                assert (await new.receive_json())["subdomain"] == "new-name"
+                assert (
+                    await api.get(
+                        "/",
+                        headers={**headers, "Host": "new-name.free.mower.work:58000"},
+                    )
+                ).status == 401
+            assert (await change("another")).status == 404
+
+    asyncio.run(scenario())
