@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>中转凭据管理 · Mower</title>
+    <style>
+      :root {
+        font:
+          15px/1.55 Inter,
+          'PingFang SC',
+          'Microsoft YaHei',
+          sans-serif;
+        color: #202e31;
+        background: #f4f6f4;
+        --ink: #153e36;
+        --line: #d7dfd9;
+        --muted: #52645d;
+        --paper: #fff;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+      }
+      [hidden] {
+        display: none !important;
+      }
+      header {
+        background: #153e36;
+        color: #fff;
+        border-bottom: 3px solid #b1daba;
+      }
+      header .bar,
+      main {
+        max-width: 1100px;
+        margin: auto;
+        padding: 0 28px;
+      }
+      .bar {
+        height: 62px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .brand {
+        font-size: 21px;
+        font-weight: 750;
+        letter-spacing: -0.04em;
+      }
+      .mark {
+        display: grid;
+        place-items: center;
+        width: 31px;
+        height: 31px;
+        background: #bfdfb9;
+        color: #153e36;
+        font: italic 800 20px/1 Arial;
+        border-radius: 7px;
+      }
+      .host {
+        font:
+          13px/1.5 ui-monospace,
+          monospace;
+        color: #d2e5da;
+        margin-left: auto;
+      }
+      main {
+        padding-top: 55px;
+        padding-bottom: 44px;
+      }
+      h1,
+      h2,
+      p {
+        margin: 0;
+      }
+      h1 {
+        font-size: clamp(28px, 4vw, 41px);
+        letter-spacing: -0.05em;
+        line-height: 1.25;
+      }
+      h2 {
+        font-size: 21px;
+        letter-spacing: -0.03em;
+      }
+      .muted,
+      small {
+        color: var(--muted);
+      }
+      .login {
+        max-width: 480px;
+        margin: clamp(25px, 8vh, 90px) auto;
+        background: var(--paper);
+        border: 1px solid var(--line);
+        border-top: 4px solid #387154;
+        border-radius: 10px;
+        padding: clamp(23px, 4vw, 36px);
+        box-shadow: 0 8px 30px #1c37240b;
+      }
+      .login h1 {
+        font-size: 30px;
+      }
+      .login p {
+        margin: 8px 0 25px;
+      }
+      label {
+        display: grid;
+        gap: 6px;
+        font-weight: 650;
+        margin: 14px 0;
+      }
+      input {
+        width: 100%;
+        font: inherit;
+        color: inherit;
+        background: white;
+        border: 1px solid #adbcb3;
+        border-radius: 6px;
+        padding: 9px 11px;
+      }
+      input:focus-visible,
+      button:focus-visible {
+        outline: 3px solid #88bba6;
+        outline-offset: 2px;
+      }
+      button {
+        font: inherit;
+        font-weight: 600;
+        color: var(--ink);
+        background: #fff;
+        border: 1px solid #c9d5cc;
+        border-radius: 6px;
+        padding: 7px 14px;
+        cursor: pointer;
+      }
+      button:hover:not(:disabled) {
+        background: #edf3ed;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .primary {
+        background: #1e5946;
+        color: white;
+        border-color: #1e5946;
+      }
+      .primary:hover:not(:disabled) {
+        background: #154432;
+      }
+      .danger {
+        color: #9b382f;
+      }
+      .danger.confirm {
+        background: #a73c31;
+        color: white;
+      }
+      .full {
+        width: 100%;
+        margin-top: 8px;
+      }
+      .plain {
+        border: 0;
+        background: transparent;
+        padding: 5px 8px;
+      }
+      .titleRow,
+      .tools,
+      .tableHead,
+      footer,
+      .dialogActions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .titleRow,
+      .tableHead {
+        justify-content: space-between;
+      }
+      .tools {
+        flex-wrap: wrap;
+      }
+      .titleRow {
+        margin-bottom: 26px;
+      }
+      .tablePanel {
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        overflow: hidden;
+      }
+      .tableHead,
+      footer {
+        padding: 17px 20px;
+      }
+      .scroll {
+        overflow-x: auto;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        text-align: left;
+        font-size: 14px;
+      }
+      th,
+      td {
+        padding: 13px 20px;
+        border-top: 1px solid #e3e9e4;
+      }
+      th {
+        background: #f6f8f5;
+        color: #586961;
+        font-size: 12px;
+        letter-spacing: 0.05em;
+        font-weight: 650;
+      }
+      td:first-child {
+        font-weight: 650;
+      }
+      td:first-child,
+      td:nth-child(2) {
+        overflow-wrap: anywhere;
+      }
+      td:last-child {
+        white-space: nowrap;
+      }
+      .state {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 2px 8px;
+        border-radius: 4px;
+        background: #eff3ef;
+        color: #51605b;
+        font-size: 13px;
+      }
+      .state.online {
+        color: #176142;
+        background: #e3f2e7;
+      }
+      .state.revoked {
+        color: #82443a;
+        background: #f8ece8;
+      }
+      .state::before {
+        content: '';
+        background: currentColor;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+      }
+      footer {
+        border-top: 1px solid var(--line);
+        justify-content: space-between;
+        color: var(--muted);
+      }
+      .empty {
+        text-align: center;
+        color: var(--muted);
+        padding: 38px;
+      }
+      .error:not(:empty) {
+        background: #faedea;
+        color: #862e26;
+        padding: 9px 12px;
+        border-radius: 5px;
+        margin: 12px 0;
+      }
+      .notice:not(:empty) {
+        color: #235a43;
+        margin: 12px 0;
+      }
+      dialog {
+        color: inherit;
+        width: min(430px, calc(100% - 32px));
+        padding: 24px;
+        border: 1px solid var(--line);
+        border-radius: 11px;
+        box-shadow: 0 24px 70px #122a2230;
+      }
+      dialog::backdrop {
+        background: #14292366;
+      }
+      dialog p {
+        margin-top: 10px;
+      }
+      .dialogActions {
+        justify-content: flex-end;
+        margin-top: 22px;
+      }
+      code {
+        font:
+          13px/1.5 ui-monospace,
+          monospace;
+      }
+      .identity {
+        font-weight: 700;
+        overflow-wrap: anywhere;
+      }
+      #secret {
+        font:
+          14px ui-monospace,
+          monospace;
+      }
+      @media (max-width: 680px) {
+        header .bar,
+        main {
+          padding-left: 16px;
+          padding-right: 16px;
+        }
+        main {
+          padding-top: 30px;
+        }
+        .titleRow {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        .host {
+          font-size: 11px;
+        }
+        th,
+        td {
+          padding: 10px;
+        }
+        .login {
+          margin: 34px auto;
+        }
+        .tableHead,
+        footer {
+          padding: 13px;
+        }
+        .tablePanel table {
+          min-width: 540px;
+        }
+      }
+    </style>
+    <script src="./admin_ui.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <div class="bar">
+        <span class="mark" aria-hidden="true">M</span><span class="brand">Mower</span
+        ><span class="host">free.mower.work:58000</span>
+      </div>
+    </header>
+    <main>
+      <section id="login" class="login">
+        <h1>中转凭据管理</h1>
+        <p class="muted">输入网关管理密钥。关闭或刷新页面后需重新输入。</p>
+        <form id="loginForm">
+          <label
+            >管理密钥<input id="key" type="password" autocomplete="off" required autofocus
+          /></label>
+          <p class="error" id="loginError" role="alert"></p>
+          <button class="primary full">连接网关</button>
+        </form>
+      </section>
+      <section id="panel" hidden>
+        <div class="titleRow">
+          <h1>中转凭据</h1>
+          <div class="tools">
+            <button id="issue" class="primary">＋ 签发凭据</button
+            ><button id="entry">管理入口</button><button id="logout">退出管理</button>
+          </div>
+        </div>
+        <p id="message" class="notice" role="status"></p>
+        <p id="listError" class="error" role="alert"></p>
+        <div class="tablePanel">
+          <div class="tableHead">
+            <h2>凭据列表</h2>
+            <div class="tools">
+              <small id="updated"></small><button id="refresh">刷新状态</button>
+            </div>
+          </div>
+          <div class="scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>子域名</th>
+                  <th>用户标识</th>
+                  <th>连接状态</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="rows"></tbody>
+            </table>
+          </div>
+          <p id="empty" class="empty" hidden>还没有已签发的凭据。</p>
+          <footer>
+            <span id="count"></span>
+            <div class="tools">
+              <button id="prev">上一页</button><button id="next">下一页</button>
+            </div>
+          </footer>
+        </div>
+      </section>
+    </main>
+    <dialog id="editor" aria-labelledby="editorTitle">
+      <form id="editForm">
+        <h2 id="editorTitle"></h2>
+        <p id="identity" class="identity"></p>
+        <p id="effect" class="muted"></p>
+        <label id="nameLabel"
+          ><span id="nameCaption">子域名</span
+          ><input id="name" maxlength="32" autocomplete="off" spellcheck="false" required
+        /></label>
+        <label id="subjectLabel"
+          >用户标识<input
+            id="subject"
+            maxlength="128"
+            placeholder="例如 manual:alice"
+            autocomplete="off"
+            required
+        /></label>
+        <p id="editError" class="error" role="alert"></p>
+        <div class="dialogActions">
+          <button type="button" id="cancel">取消</button
+          ><button class="primary" id="submitEdit">签发</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="entryDialog" aria-labelledby="entryTitle">
+      <form id="entryForm">
+        <h2 id="entryTitle">管理入口</h2>
+        <p class="muted" id="entryHelp"></p>
+        <label
+          >网页入口路径<input
+            id="entryPath"
+            placeholder="/ops-mower/"
+            maxlength="128"
+            required
+            autocomplete="off"
+            spellcheck="false"
+        /></label>
+        <p id="entryError" class="error" role="alert"></p>
+        <div class="dialogActions">
+          <button id="entryCancel" type="button">取消</button
+          ><button class="primary">保存入口</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="issued" aria-labelledby="issuedTitle">
+      <h2 id="issuedTitle">凭据已签发</h2>
+      <p class="identity" id="issuedName"></p>
+      <p class="muted">凭据只返回一次。复制后，交给对应用户填写在 Mower 的中转设置中。</p>
+      <label>中转凭据<input id="secret" readonly autocomplete="off" spellcheck="false" /></label>
+      <p id="copyStatus" role="status"></p>
+      <div class="dialogActions">
+        <button id="done">关闭</button><button id="copy" class="primary">复制凭据</button>
+      </div>
+    </dialog>
+  </body>
+</html>

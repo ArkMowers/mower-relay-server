@@ -20,6 +20,7 @@ from aiohttp import WSMsgType, web
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
 from mower_relay_server.admin_api import create_admin_app
+from mower_relay_server.admin_entry import AdminEntry
 from mower_relay_server.protocol import (
     DOMAIN,
     MAX_BODY,
@@ -496,9 +497,12 @@ def create_app(registry, ui, session_key, admin_token, *, ui_origin=DEFAULT_UI_O
             )
         return response
 
-    app = web.Application(client_max_size=MAX_BODY, middlewares=[headers, entry_limit])
+    entry = AdminEntry(gateway.registry)
+    app = web.Application(
+        client_max_size=MAX_BODY, middlewares=[headers, entry_limit, entry.serve]
+    )
     app[GATEWAY] = gateway
-    app.add_subapp("/admin", create_admin_app(gateway, admin_token))
+    app.add_subapp("/admin", create_admin_app(gateway, admin_token, entry))
     app.router.add_get("/__mower/connect", gateway.connect)
     app.router.add_route("*", "/{path:.*}", gateway.handle)
 

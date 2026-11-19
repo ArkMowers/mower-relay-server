@@ -20,7 +20,7 @@ from mower_relay_server.protocol import (
 )
 
 
-def create_admin_app(gateway, token):
+def create_admin_app(gateway, token, entry):
     if not isinstance(token, str) or len(token) < 32:
         raise ValueError("管理 API 密钥至少需要 32 个字符")
 
@@ -150,10 +150,23 @@ def create_admin_app(gateway, token):
     async def revoke_user(request):
         return await update_user(request, rename_to_new=False)
 
+    async def manage_entry(request):
+        if request.method == "PUT":
+            try:
+                data = await request.json()
+                if not isinstance(data, dict) or set(data) != {"original", "path"}:
+                    raise ValueError("需要 original 和 path")
+                await entry.change(data["original"], data["path"])
+            except ValueError as exc:
+                raise web.HTTPBadRequest(text=str(exc)) from None
+        return web.json_response({"path": entry.path})
+
     async def initialize(app):
         await asyncio.to_thread(initialize_registry, gateway.registry)
 
     app.on_startup.append(initialize)
+    app.router.add_get("/entry", manage_entry)
+    app.router.add_put("/entry", manage_entry)
     app.router.add_get("/users", list_users)
     app.router.add_get("/users/{name}", get_user)
     app.router.add_post("/users", issue_user)
