@@ -11,7 +11,7 @@ python3.12 -m venv .relay-venv
 .relay-venv/bin/python -m pip install .
 ```
 
-将对应 Mower 版本的前端及图片资源复制到 `ui-dist`，包括 `index.html` 和 `frontend-routes.json`。完整资源准备要求见 [Windows 指南的文件准备](windows.md#1-准备文件与证书)，仅需将 Windows 路径换为实际工作目录。服务端不需要 Mower Python 包或源码。
+按 [R2 配置](r2.md) 发布与实例匹配的前端。
 
 证书完整链及私钥分别放在 `certificates/free.mower.work.crt`、`certificates/free.mower.work.key`，证书同时覆盖 `free.mower.work` 和 `*.free.mower.work`。证书须为 PEM 格式；如果完整链位于 `.pem` 文件，使用 `--cert-file` 指定。启动：
 
@@ -25,7 +25,7 @@ sh ./start.sh
 
 ## Linux systemd
 
-使用独立服务账号运行，确保其能读取证书和前端、写入 `data`。以下是单元模板，须将 `<工作目录绝对路径>` 替换为管理员选择的实际目录，并调整服务账号：
+使用独立服务账号运行，确保其能读取证书、写入 `data`。以下是单元模板，须将 `<工作目录绝对路径>` 替换为管理员选择的实际目录，并调整服务账号：
 
 ```ini
 [Unit]

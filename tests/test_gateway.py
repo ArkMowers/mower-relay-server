@@ -198,7 +198,7 @@ def test_work_directory_initializes_separate_secrets_and_preserves_them(
     assert (data / "admin-token.txt").read_bytes() == admin
     gateway = run.call_args.args[0][GATEWAY]
     assert gateway.registry == (data / "users.json").resolve()
-    assert gateway.ui == ui.resolve()
+    assert gateway.ui_origin == "https://mower.231240092.xyz"
 
 
 def test_https_bot_and_wss_agent_share_one_tls_listener(tmp_path, tls_files):
@@ -308,10 +308,12 @@ def test_gateway_requires_individual_admission_and_local_login_before_http(tmp_p
                     "Authorization": f"Bearer {credential}",
                 },
             ) as agent:
-                await agent.send_json({"op": "hello", "version": 1})
+                build = "a" * 64
+                await agent.send_json({"op": "hello", "version": 1, "ui_build": build})
                 assert await agent.receive_json(timeout=2) == {
                     "op": "ready",
                     "version": 1,
+                    "ui_build": build,
                 }
                 with pytest.raises(WSServerHandshakeError) as duplicate:
                     await transport.ws_connect(
@@ -370,7 +372,16 @@ def test_gateway_requires_individual_admission_and_local_login_before_http(tmp_p
                 )
                 headers = {**host, "Cookie": f"{COOKIE}={cookie.value}"}
                 home = await browser.get("/", headers=headers)
-                assert await home.text() == "<h1>Official Mower</h1>"
+                shell = await home.text()
+                assert "https://mower.231240092.xyz" in shell and build in shell
+                assert (
+                    await browser.get("/assets/demo.js", headers=headers)
+                ).status == 404
+                assert (
+                    await browser.get(
+                        "/settings", headers={**headers, "Accept": "text/html"}
+                    )
+                ).status == 200
                 assert (
                     await browser.get("/not-a-mower-operation", headers=headers)
                 ).status == 404
@@ -491,6 +502,7 @@ def test_sessions_are_bound_to_tenant_and_connection_and_login_is_limited(tmp_pa
         issue(registry, "bob", subject="qq:bob")
         gateway = app[GATEWAY]
         alice = Peer(Mock(closed=False))
+        alice.ui_build = "a" * 64
         bob = Peer(Mock(closed=False))
         gateway.peers.update(alice=alice, bob=bob)
         signed = gateway.signer.dumps(

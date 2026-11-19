@@ -6,7 +6,7 @@ Mower 专用的 HTTPS/WSS 中转服务，独立于 [Arknights Mower](https://git
 - 内置客户端连接：`wss://free.mower.work:58000/__mower/connect`。
 - 异机 bot 管理 API：`https://free.mower.work:58000/admin/`，使用独立 Bearer 管理密钥。
 - 管理员审核后发放独立凭据。Mower 用户名、密码校验值和实例 token 由本地 Mower 保存及验证。
-- 服务端只分派明确允许的 Mower 操作，不接受目标地址、端口或通用 TCP 流。前端静态文件由管理员部署。
+- 服务端只分派明确允许的 Mower 操作，不接受目标地址、端口或通用 TCP 流。前端静态文件由浏览器从 R2 直接读取。
 
 本项目实现协议 v1，需配合具有内置中转客户端的 Mower 版本使用；该客户端接入目前尚未发布。开源客户端不能证明其运行的代码未经修改，合法凭据持有人仍可模拟协议。服务通过准入、操作限制、限额及吊销控制用途，不承诺阻止所有伪装或滥用。
 
@@ -28,13 +28,12 @@ Windows 使用 `py -3.12 -m venv .relay-venv` 及 `.relay-venv\Scripts\python.ex
 <工作目录>/
   certificates/free.mower.work.crt   # PEM 格式完整证书链
   certificates/free.mower.work.key   # 匹配的私钥
-  ui-dist/                          # 对应 Mower 版本的前端和资源
   data/                             # 自动生成的管理密钥、会话密钥及注册文件
 ```
 
-`ui-dist` 须包含 `index.html`、`frontend-routes.json` 和前端资源。前端在构建机准备后复制到服务器，不需要把 Mower 源码或 Python 包部署到服务器。证书须同时覆盖 `free.mower.work` 和 `*.free.mower.work`。
+前端发布和域名设置见 [R2 配置](docs/r2.md)。网关证书须同时覆盖 `free.mower.work` 和 `*.free.mower.work`。
 
-服务默认监听 `0.0.0.0:58000`，支持 `--bind` 选择监听地址。`--ui`、`--registry`、`--cert-file`、`--key-file`、`--session-key-file` 和 `--admin-token-file` 可覆盖对应路径。证书更新后需要重启服务，客户端会重新连接，用户需重新登录。
+服务默认监听 `0.0.0.0:58000`，支持 `--bind` 选择监听地址。`--ui-origin`、`--registry`、`--cert-file`、`--key-file`、`--session-key-file` 和 `--admin-token-file` 可覆盖对应路径。证书更新后需要重启服务，客户端会重新连接，用户需重新登录。
 
 完整步骤见 [Windows 部署](docs/windows.md)、[Linux/macOS 部署](docs/posix.md)、[bot 管理 API](docs/admin-api.md) 和[服务端行为说明](docs/architecture.md)。
 

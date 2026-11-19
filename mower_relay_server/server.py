@@ -7,11 +7,13 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import ssl
 import time
 from collections import OrderedDict
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from aiohttp import WSMsgType, web
@@ -34,7 +36,9 @@ from mower_relay_server.protocol import (
     valid_subdomain,
     validate_response,
 )
-from mower_relay_server.ui_cache import BUILD, UiCache
+
+BUILD = re.compile(r"[a-f0-9]{64}")
+DEFAULT_UI_ORIGIN = "https://mower.231240092.xyz"
 
 BASIC_CHALLENGE = 'Basic realm="Mower", charset="UTF-8"'
 
@@ -71,7 +75,6 @@ class Peer:
         self.requests = 0
         self.inflight = 0
         self.ui_build = None
-        self.ui_pages = None
 
     def charge(self, size):
         now = time.monotonic()
@@ -103,23 +106,26 @@ class Peer:
 
 
 class Gateway:
-    def __init__(self, registry, ui, session_key):
+    def __init__(self, registry, session_key, ui_origin):
         self.registry = Path(registry)
-        self.ui = Path(ui).resolve()
         if len(session_key) < 32:
             raise ValueError("网关会话密钥至少需要 32 个字符")
         self.signer = URLSafeTimedSerializer(session_key, salt="mower-relay-v1")
         self.peers = {}
-        self.cache = UiCache(
-            self.ui.parent / "relay-ui-cache",
-            lambda: {peer.ui_build for peer in self.peers.values()},
-        )
+        origin = urlsplit(ui_origin)
+        if (
+            origin.scheme != "https"
+            or not origin.hostname
+            or origin.username is not None
+            or origin.path not in {"", "/"}
+            or origin.query
+            or origin.fragment
+            or not re.fullmatch(r"[a-zA-Z0-9.-]+(?::[0-9]+)?", origin.netloc)
+        ):
+            raise ValueError("前端地址须为 HTTPS 域名")
+        self.ui_origin = f"https://{origin.netloc}"
+        self.shell = INITIALIZING.read_text("utf-8")
         self.failures = OrderedDict()
-        manifest = self.ui / "frontend-routes.json"
-        self.pages = {
-            path.rstrip("/").lower() or "/"
-            for path in json.loads(manifest.read_text("utf-8"))
-        }
 
     def users(self):
         try:
@@ -201,8 +207,6 @@ class Gateway:
                     raise ValueError("前端构建标识无效")
                 peer.ui_build = ready["ui_build"] = build
             await ws.send_json(ready)
-            if peer.ui_build:
-                self.cache.state(peer.ui_build)
             async for frame in ws:
                 if frame.type != WSMsgType.TEXT:
                     break
@@ -307,9 +311,7 @@ class Gateway:
         if self.authenticated(request, name, peer):
             return await self.serve(request, name, peer)
         if request.headers.get("Sec-Fetch-Site") == "cross-site" and not (
-            request.method == "GET"
-            and (request.path == "/" or request.path in self.pages)
-            and html_navigation(request)
+            request.method == "GET" and html_navigation(request)
         ):
             raise web.HTTPForbidden()
         origin = request.headers.get("Origin")
@@ -379,44 +381,22 @@ class Gateway:
                 if not peer.ws.closed:
                     await peer.ws.send_json({"op": "ws_close", "id": key})
             return socket
-        ui_root, pages = self.ui, self.pages
-        if peer.ui_build:
-            build = peer.ui_build
-            if request.path == "/__mower/ui-state" and request.method in {
-                "GET",
-                "POST",
-            }:
-                return web.json_response(
-                    self.cache.state(build, retry=request.method == "POST")
+        if request.method in {"GET", "HEAD"} and (
+            request.path == "/" or html_navigation(request)
+        ):
+            if not peer.ui_build:
+                raise web.HTTPServiceUnavailable(
+                    text="此实例未提供界面版本，请在本机使用 Mower。"
                 )
-            ui_root = self.cache.directory(build)
-            if not ui_root.is_dir():
-                if request.method == "GET" and (
-                    request.path == "/" or html_navigation(request)
-                ):
-                    self.cache.state(build)
-                    return web.FileResponse(INITIALIZING)
-                if not allowed_request(request.method, request.path_qs):
-                    raise web.HTTPServiceUnavailable(text="前端正在准备")
-            else:
-                if peer.ui_pages is None:
-                    os.utime(ui_root)
-                    peer.ui_pages = set(
-                        json.loads((ui_root / "frontend-routes.json").read_bytes())
-                    )
-                pages = peer.ui_pages
-        if request.method in {"GET", "HEAD"}:
-            if (
-                request.path == "/"
-                or request.path.rstrip("/").lower() in pages
-                and html_navigation(request)
-            ):
-                return web.FileResponse(ui_root / "index.html")
-            if not allowed_request(request.method, request.path):
-                path = (ui_root / request.path.lstrip("/")).resolve()
-                if path.is_relative_to(ui_root) and path.is_file():
-                    return web.FileResponse(path)
-                raise web.HTTPNotFound()
+            html = self.shell.replace("__BUILD__", peer.ui_build).replace(
+                "__UI_ORIGIN__", self.ui_origin
+            )
+            return web.Response(
+                text=html,
+                content_type="text/html",
+                headers={"Vary": "Accept, Sec-Fetch-Dest"},
+            )
+
         if not allowed_request(request.method, request.path_qs):
             raise web.HTTPNotFound()
         if peer.inflight >= MAX_PENDING:
@@ -455,8 +435,8 @@ class Gateway:
         return response
 
 
-def create_app(registry, ui, session_key, admin_token, *, prefetch=False):
-    gateway = Gateway(registry, ui, session_key)
+def create_app(registry, ui, session_key, admin_token, *, ui_origin=DEFAULT_UI_ORIGIN):
+    gateway = Gateway(registry, session_key, ui_origin)
     traffic = OrderedDict()
 
     @web.middleware
@@ -495,8 +475,6 @@ def create_app(registry, ui, session_key, admin_token, *, prefetch=False):
                 status=exc.status, text=exc.text, headers=exc.headers
             )
         if not response.prepared:
-            if request.path.rstrip("/").lower() in gateway.pages:
-                response.headers["Vary"] = "Accept, Sec-Fetch-Dest"
             response.headers.update(
                 {
                     "Cache-Control": "no-store",
@@ -513,23 +491,11 @@ def create_app(registry, ui, session_key, admin_token, *, prefetch=False):
     app.router.add_get("/__mower/connect", gateway.connect)
     app.router.add_route("*", "/{path:.*}", gateway.handle)
 
-    channel_task = None
-
-    async def start_channels(app):
-        nonlocal channel_task
-        channel_task = asyncio.create_task(gateway.cache.prefetch_channels())
-
     async def shutdown(app):
-        if channel_task is not None:
-            channel_task.cancel()
-            await asyncio.gather(channel_task, return_exceptions=True)
-        await gateway.cache.close()
         await asyncio.gather(
             *(peer.ws.close() for peer in list(gateway.peers.values()))
         )
 
-    if prefetch:
-        app.on_startup.append(start_channels)
     app.on_shutdown.append(shutdown)
     return app
 
@@ -560,7 +526,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--work-dir", type=Path, default=Path.cwd())
     parser.add_argument("--registry", type=Path)
-    parser.add_argument("--ui", type=Path)
+    parser.add_argument("--ui", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--ui-origin")
     parser.add_argument("--session-key-file", type=Path)
     parser.add_argument("--admin-token-file", type=Path)
     parser.add_argument("--cert-file", type=Path)
@@ -581,7 +548,12 @@ def main():
         location(args.ui, "ui-dist"),
         read_or_create_secret(location(args.session_key_file, "data/session-key.txt")),
         read_or_create_secret(location(args.admin_token_file, "data/admin-token.txt")),
-        prefetch=True,
+        ui_origin=args.ui_origin
+        or (
+            (work_dir / "ui-origin.txt").read_text("utf-8-sig").strip()
+            if (work_dir / "ui-origin.txt").is_file()
+            else DEFAULT_UI_ORIGIN
+        ),
     )
     # 页面查询参数可能含实例 token，关闭访问日志。
     web.run_app(
