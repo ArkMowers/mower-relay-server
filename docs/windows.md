@@ -50,12 +50,12 @@ Windows 防火墙仅需允许公网入站 TCP 58000，服务不再监听 58001�
 
 bot 部署在另一台机器，通过当前管理入口调用 API，默认地址为 `https://free.mower.work:58000/admin/`。管理操作、用户网页和 Mower 连接由同一个 HTTPS 服务处理，共用公网 TCP 58000。管理请求仅接受主域名，用户子域名下的管理 API 返回 404。
 
-将中转机 `.\data\admin-token.txt` 中的管理密钥通过可信渠道配置为 bot 机器上的环境变量 `MOWER_RELAY_ADMIN_TOKEN`。如果修改过管理入口，在 bot 机器上把 `MOWER_RELAY_ADMIN_PATH` 设为新路径。所有请求携带 `Authorization: Bearer <管理密钥>`，不写进公开源码或群聊。以下示例在 bot 机器运行，始终校验 HTTPS 证书：
+将中转机 `.\data\admin-token.txt` 中的管理密钥通过可信渠道配置为 bot 机器上的环境变量 `MOWER_RELAY_ADMIN_TOKEN`。将网关当前入口路径填入 bot 运行环境的 `MOWER_RELAY_ADMIN_PATH`，再按[接入已配置的网关](admin-api.md#接入已配置的网关)用一行 CMD 命令验证。所有请求携带 `Authorization: Bearer <管理密钥>`，不写进公开源码或群聊。以下示例在 bot 机器运行，始终校验 HTTPS 证书：
 
 ```powershell
 $RelayAdminToken = $env:MOWER_RELAY_ADMIN_TOKEN
 $RelayPath = $env:MOWER_RELAY_ADMIN_PATH
-if (-not $RelayPath) { $RelayPath = "/admin/" }
+if (-not $RelayPath) { throw "请先设置当前管理入口 MOWER_RELAY_ADMIN_PATH" }
 $RelayUsers = "https://free.mower.work:58000/" + $RelayPath.Trim("/") + "/users"
 $RelayHeaders = @{ Authorization = "Bearer $RelayAdminToken" }
 $RelayBody = @{ subdomain = "alice"; subject = "qq:123456789" } | ConvertTo-Json
@@ -70,7 +70,7 @@ Invoke-RestMethod -Uri "${RelayUsers}?subject=qq%3A123456789&offset=0&limit=20" 
 Invoke-RestMethod -Method Post -Uri "$RelayUsers/alice/revoke" -Headers $RelayHeaders
 ```
 
-HTTP 403 表示管理密钥无效；400 表示输入无效；404 表示用户不存在；409 表示名称或外部用户标识已占用。查询不返回凭据原值及其摘要。管理 API 不负责识别 QQ 用户或判断是否通过审核，bot 必须在调用前执行自己的身份与审核规则。
+HTTP 403 表示管理密钥无效；400 表示输入无效；404 表示需要核对入口路径和查询的用户名；409 表示名称或外部用户标识已占用。查询不返回凭据原值及其摘要。管理 API 不负责识别 QQ 用户或判断是否通过审核，bot 必须在调用前执行自己的身份与审核规则。
 
 停止网关后也可使用本地 CLI 签发或吊销：
 
