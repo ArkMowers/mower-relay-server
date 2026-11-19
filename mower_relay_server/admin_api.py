@@ -42,7 +42,7 @@ def create_admin_app(gateway, token):
             "subdomain": name,
             "subject": record.get("subject", ""),
             "enabled": record.get("enabled") is True,
-            "connected": bool(peer and not peer.ws.closed),
+            "connected": bool(peer and peer.ui_build and not peer.ws.closed),
             "url": public_origin(name),
         }
 

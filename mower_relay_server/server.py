@@ -136,16 +136,11 @@ class Gateway:
             raise web.HTTPServiceUnavailable()
         return data
 
-    def admitted(self, name, credential=None):
+    def admitted(self, name):
         record = self.users().get(name)
         if not isinstance(record, dict) or record.get("enabled") is not True:
             raise web.HTTPForbidden()
-        expected = record.get("credential_sha256", "")
-        if credential is not None and not hmac.compare_digest(
-            hashlib.sha256(credential.encode()).hexdigest(), expected
-        ):
-            raise web.HTTPForbidden()
-        return expected
+        return record["credential_sha256"]
 
     def tenant(self, request):
         host = request.host.lower()
@@ -160,7 +155,7 @@ class Gateway:
 
     def peer(self, name):
         peer = self.peers.get(name)
-        if peer is None or peer.ws.closed:
+        if peer is None or peer.ws.closed or not peer.ui_build:
             raise web.HTTPServiceUnavailable(text="Mower 实例未连接")
         return peer
 
@@ -178,13 +173,21 @@ class Gateway:
     async def connect(self, request):
         if request.host.lower() != f"{DOMAIN}:{PORT}":
             raise web.HTTPNotFound()
-        name = request.headers.get("X-Mower-Subdomain", "")
-        if not valid_subdomain(name):
-            raise web.HTTPForbidden()
         header = request.headers.get("Authorization", "")
-        if not header.startswith("Bearer ") or len(header) > 512:
+        if not header.startswith("Bearer ") or not 7 < len(header) <= 512:
             raise web.HTTPForbidden()
-        digest = self.admitted(name, header[7:])
+        digest = hashlib.sha256(header[7:].encode()).hexdigest()
+        matches = [
+            name
+            for name, record in self.users().items()
+            if valid_subdomain(name)
+            and isinstance(record, dict)
+            and record.get("enabled") is True
+            and hmac.compare_digest(digest, record.get("credential_sha256", ""))
+        ]
+        if len(matches) != 1:
+            raise web.HTTPForbidden()
+        name = matches[0]
         if name in self.peers:
             raise web.HTTPConflict(text="实例已经连接")
         # Reserve the domain before the first await to prevent duplicate admission.
@@ -200,13 +203,18 @@ class Gateway:
                 or hello.get("version") != VERSION
             ):
                 raise ValueError("协议版本无效")
-            ready = {"op": "ready", "version": VERSION}
-            if "ui_build" in hello:
-                build = hello["ui_build"]
-                if not isinstance(build, str) or not BUILD.fullmatch(build):
-                    raise ValueError("前端构建标识无效")
-                peer.ui_build = ready["ui_build"] = build
-            await ws.send_json(ready)
+            build = hello.get("ui_build")
+            if not isinstance(build, str) or not BUILD.fullmatch(build):
+                raise ValueError("前端构建标识无效")
+            peer.ui_build = build
+            await ws.send_json(
+                {
+                    "op": "ready",
+                    "version": VERSION,
+                    "subdomain": name,
+                    "ui_build": build,
+                }
+            )
             async for frame in ws:
                 if frame.type != WSMsgType.TEXT:
                     break
@@ -384,10 +392,6 @@ class Gateway:
         if request.method in {"GET", "HEAD"} and (
             request.path == "/" or html_navigation(request)
         ):
-            if not peer.ui_build:
-                raise web.HTTPServiceUnavailable(
-                    text="此实例未提供界面版本，请在本机使用 Mower。"
-                )
             html = self.shell.replace("__BUILD__", peer.ui_build).replace(
                 "__UI_ORIGIN__", self.ui_origin
             )

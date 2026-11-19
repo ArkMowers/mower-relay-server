@@ -219,12 +219,15 @@ def test_https_bot_and_wss_agent_share_one_tls_listener(tmp_path, tls_files):
                 headers={
                     "Host": headers["Host"],
                     "Authorization": f"Bearer {credential}",
-                    "X-Mower-Subdomain": "alice",
                 },
             ) as agent:
-                await agent.send_json({"op": "hello", "version": 1})
+                await agent.send_json(
+                    {"op": "hello", "version": 1, "ui_build": "a" * 64}
+                )
                 assert await agent.receive_json(timeout=2) == {
                     "op": "ready",
+                    "subdomain": "alice",
+                    "ui_build": "a" * 64,
                     "version": 1,
                 }
                 status = await bot.get("/admin/users/alice", headers=headers)
@@ -235,6 +238,28 @@ def test_https_bot_and_wss_agent_share_one_tls_listener(tmp_path, tls_files):
                     WSMsgType.CLOSE,
                     WSMsgType.CLOSED,
                 }
+
+    asyncio.run(scenario())
+
+
+def test_missing_build_and_ambiguous_credential_are_rejected(tmp_path):
+    async def scenario():
+        app, registry, credential = fixture_gateway(tmp_path)
+        headers = {
+            "Host": "free.mower.work:58000",
+            "Authorization": f"Bearer {credential}",
+        }
+        async with TestClient(TestServer(app)) as browser:
+            async with browser.ws_connect("/__mower/connect", headers=headers) as agent:
+                await agent.send_json({"op": "hello", "version": 1})
+                assert (await agent.receive(timeout=2)).type == WSMsgType.CLOSE
+            users = json.loads(registry.read_bytes())
+            users["bob"] = users["alice"]
+            registry.write_text(json.dumps(users))
+            with pytest.raises(WSServerHandshakeError) as rejected:
+                await browser.ws_connect("/__mower/connect", headers=headers)
+            assert rejected.value.status == 403
+            assert not app[GATEWAY].peers
 
     asyncio.run(scenario())
 
@@ -289,13 +314,12 @@ def test_gateway_requires_individual_admission_and_local_login_before_http(tmp_p
             connect_url = str(browser.make_url("/__mower/connect")).replace(
                 "http:", "ws:"
             )
-            for name, secret in (("alice", "wrong"), ("bob", credential)):
+            for secret in ("", "wrong"):
                 with pytest.raises(WSServerHandshakeError) as caught:
                     await transport.ws_connect(
                         connect_url,
                         headers={
                             "Host": "free.mower.work:58000",
-                            "X-Mower-Subdomain": name,
                             "Authorization": f"Bearer {secret}",
                         },
                     )
@@ -304,7 +328,6 @@ def test_gateway_requires_individual_admission_and_local_login_before_http(tmp_p
                 connect_url,
                 headers={
                     "Host": "free.mower.work:58000",
-                    "X-Mower-Subdomain": "alice",
                     "Authorization": f"Bearer {credential}",
                 },
             ) as agent:
@@ -313,6 +336,7 @@ def test_gateway_requires_individual_admission_and_local_login_before_http(tmp_p
                 assert await agent.receive_json(timeout=2) == {
                     "op": "ready",
                     "version": 1,
+                    "subdomain": "alice",
                     "ui_build": build,
                 }
                 with pytest.raises(WSServerHandshakeError) as duplicate:
@@ -320,7 +344,6 @@ def test_gateway_requires_individual_admission_and_local_login_before_http(tmp_p
                         connect_url,
                         headers={
                             "Host": "free.mower.work:58000",
-                            "X-Mower-Subdomain": "alice",
                             "Authorization": f"Bearer {credential}",
                         },
                     )
@@ -504,6 +527,7 @@ def test_sessions_are_bound_to_tenant_and_connection_and_login_is_limited(tmp_pa
         alice = Peer(Mock(closed=False))
         alice.ui_build = "a" * 64
         bob = Peer(Mock(closed=False))
+        bob.ui_build = "b" * 64
         gateway.peers.update(alice=alice, bob=bob)
         signed = gateway.signer.dumps(
             {"tenant": "alice", "connection": alice.generation}
@@ -521,6 +545,7 @@ def test_sessions_are_bound_to_tenant_and_connection_and_login_is_limited(tmp_pa
                     )
                 ).status == 401
                 gateway.peers["alice"] = Peer(Mock(closed=False))
+                gateway.peers["alice"].ui_build = "a" * 64
                 assert (await browser.get("/", headers=headers)).status == 401
                 gateway.failures["alice"] = [asyncio.get_running_loop().time()] * 5
                 limited = await browser.get(
@@ -546,11 +571,12 @@ def test_gateway_does_not_serve_html_supplied_by_an_admitted_client(tmp_path):
                 url,
                 headers={
                     "Host": "free.mower.work:58000",
-                    "X-Mower-Subdomain": "alice",
                     "Authorization": f"Bearer {credential}",
                 },
             ) as agent:
-                await agent.send_json({"op": "hello", "version": 1})
+                await agent.send_json(
+                    {"op": "hello", "version": 1, "ui_build": "a" * 64}
+                )
                 await agent.receive_json(timeout=2)
                 peer = app[GATEWAY].peers["alice"]
                 signed = app[GATEWAY].signer.dumps(
@@ -585,6 +611,7 @@ def test_gateway_rejects_concurrency_and_traffic_excess_before_dispatch(tmp_path
         app, _, _ = fixture_gateway(tmp_path)
         gateway = app[GATEWAY]
         peer = Peer(Mock(closed=False))
+        peer.ui_build = "a" * 64
         gateway.peers["alice"] = peer
         signed = gateway.signer.dumps(
             {"tenant": "alice", "connection": peer.generation}
