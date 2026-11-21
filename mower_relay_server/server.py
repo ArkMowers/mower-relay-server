@@ -4,11 +4,11 @@ import argparse
 import asyncio
 import base64
 import hashlib
-import hmac
 import json
 import os
 import re
 import secrets
+import sqlite3
 import ssl
 import time
 from collections import OrderedDict
@@ -37,6 +37,7 @@ from mower_relay_server.protocol import (
     valid_subdomain,
     validate_response,
 )
+from mower_relay_server.registry import Registry
 
 BUILD = re.compile(r"[a-f0-9]{64}")
 DEFAULT_UI_ORIGIN = "https://mower.231240092.xyz"
@@ -109,7 +110,7 @@ class Peer:
 
 class Gateway:
     def __init__(self, registry, session_key, ui_origin):
-        self.registry = Path(registry)
+        self.registry = Registry(registry)
         if len(session_key) < 32:
             raise ValueError("网关会话密钥至少需要 32 个字符")
         self.signer = URLSafeTimedSerializer(session_key, salt="mower-relay-v1")
@@ -129,18 +130,9 @@ class Gateway:
         self.shell = INITIALIZING.read_text("utf-8")
         self.failures = OrderedDict()
 
-    def users(self):
-        try:
-            data = json.loads(self.registry.read_text("utf-8"))
-        except (OSError, ValueError):
-            raise web.HTTPServiceUnavailable(text="审核名单不可用") from None
-        if not isinstance(data, dict):
-            raise web.HTTPServiceUnavailable()
-        return data
-
-    def admitted(self, name):
-        record = self.users().get(name)
-        if not isinstance(record, dict) or record.get("enabled") is not True:
+    async def admitted(self, name):
+        record = await asyncio.to_thread(self.registry.get, name)
+        if record is None or not record["enabled"]:
             raise web.HTTPForbidden()
         return record["credential_sha256"]
 
@@ -154,8 +146,8 @@ class Gateway:
             raise web.HTTPNotFound()
         return name
 
-    def peer(self, name):
-        digest = self.admitted(name)
+    async def peer(self, name):
+        digest = await self.admitted(name)
         peer = self.peers.get(name)
         if (
             peer is None
@@ -184,17 +176,9 @@ class Gateway:
         if not header.startswith("Bearer ") or not 7 < len(header) <= 512:
             raise web.HTTPForbidden()
         digest = hashlib.sha256(header[7:].encode()).hexdigest()
-        matches = [
-            name
-            for name, record in self.users().items()
-            if valid_subdomain(name)
-            and isinstance(record, dict)
-            and record.get("enabled") is True
-            and hmac.compare_digest(digest, record.get("credential_sha256", ""))
-        ]
-        if len(matches) != 1:
+        name = await asyncio.to_thread(self.registry.identify, digest)
+        if name is None:
             raise web.HTTPForbidden()
-        name = matches[0]
         if name in self.peers:
             raise web.HTTPConflict(text="实例已经连接")
         # Reserve the domain before the first await to prevent duplicate admission.
@@ -225,7 +209,7 @@ class Gateway:
             async for frame in ws:
                 if frame.type != WSMsgType.TEXT:
                     break
-                if self.admitted(name) != digest:
+                if await self.admitted(name) != digest:
                     break
                 peer.charge(len(frame.data.encode()))
                 message = json.loads(frame.data)
@@ -277,6 +261,7 @@ class Gateway:
             TypeError,
             TimeoutError,
             ConnectionError,
+            sqlite3.Error,
             web.HTTPException,
         ):
             pass
@@ -322,7 +307,7 @@ class Gateway:
 
     async def handle(self, request):
         name = self.tenant(request)
-        peer = self.peer(name)
+        peer = await self.peer(name)
         if self.authenticated(request, name, peer):
             return await self.serve(request, name, peer)
         if request.headers.get("Sec-Fetch-Site") == "cross-site" and not (
@@ -384,7 +369,7 @@ class Gateway:
                     {"op": "ws_open", "id": key, "path": request.path}
                 )
                 async for frame in socket:
-                    if self.peer(name) is not peer:
+                    if await self.peer(name) is not peer:
                         break
                     if frame.type != WSMsgType.TEXT:
                         break
@@ -482,6 +467,8 @@ def create_app(registry, ui, session_key, admin_token, *, ui_origin=DEFAULT_UI_O
     async def headers(request, handler):
         try:
             response = await handler(request)
+        except sqlite3.Error:
+            response = web.Response(status=503, text="凭据数据库不可用")
         except web.HTTPException as exc:
             response = web.Response(
                 status=exc.status, text=exc.text, headers=exc.headers
@@ -497,7 +484,7 @@ def create_app(registry, ui, session_key, admin_token, *, ui_origin=DEFAULT_UI_O
             )
         return response
 
-    entry = AdminEntry(gateway.registry)
+    entry = AdminEntry(gateway.registry.path)
     app = web.Application(
         client_max_size=MAX_BODY, middlewares=[headers, entry_limit, entry.serve]
     )
@@ -558,7 +545,7 @@ def main():
         location(args.key_file, "certificates/free.mower.work.key"),
     )
     app = create_app(
-        location(args.registry, "data/users.json"),
+        location(args.registry, "data/users.sqlite3"),
         location(args.ui, "ui-dist"),
         read_or_create_secret(location(args.session_key_file, "data/session-key.txt")),
         read_or_create_secret(location(args.admin_token_file, "data/admin-token.txt")),

@@ -15,7 +15,7 @@ $SessionKey = Join-Path $DataDirectory "session-key.txt"
 $AdminToken = Join-Path $DataDirectory "admin-token.txt"
 & .\.relay-venv\Scripts\python.exe -m mower_relay_server.server `
     --work-dir $PSScriptRoot `
-    --registry (Join-Path $DataDirectory "users.json") `
+    --registry (Join-Path $DataDirectory "users.sqlite3") `
     --ui $UiDirectory --session-key-file $SessionKey --admin-token-file $AdminToken `
     --cert-file $CertificateFile --key-file $PrivateKeyFile
 if ($LASTEXITCODE -ne 0) { throw "Mower relay exited: $LASTEXITCODE" }

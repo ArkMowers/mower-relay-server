@@ -28,8 +28,16 @@ Windows 使用 `py -3.12 -m venv .relay-venv` 及 `.relay-venv\Scripts\python.ex
 <工作目录>/
   certificates/free.mower.work.crt   # PEM 格式完整证书链
   certificates/free.mower.work.key   # 匹配的私钥
-  data/                             # 自动生成的管理密钥、会话密钥及注册文件
+  data/                             # 管理密钥、会话密钥及凭据数据库
 ```
+
+### 已有网关升级到 SQLite
+
+1. 停止旧网关，在服务停止期间备份整个工作目录的 `data` 文件夹。升级程序后，以原工作目录启动。
+2. 首次启动自动将 `data/users.json` 导入同目录的 `users.sqlite3`，保留子域名、用户标识、启用状态和凭据摘要。导入提交后，旧文件改名为 `users.json.migrated`。原有 `--registry …/users.json` 启动命令仍可使用。新安装直接创建数据库。
+3. 用原管理密钥查询用户，核对启用和吊销记录，并用已有凭据重连。原管理入口、管理密钥和会话密钥沿用原文件。若旧数据损坏、启用记录的凭据摘要或非空用户标识重复，网关会在监听前报告错误，保留原文件供核查。
+
+备份时停止网关并复制整个 `data` 目录。迁移后尚未变更记录时，可停机恢复升级前备份和旧程序。迁移后的签发、改名和吊销只写入 SQLite。此后回退旧程序前，必须把数据库的最新记录同步到旧格式，否则旧备份可能重新启用已吊销的凭据。
 
 前端发布和域名设置见 [R2 配置](docs/r2.md)。网关证书须同时覆盖 `free.mower.work` 和 `*.free.mower.work`。
 
