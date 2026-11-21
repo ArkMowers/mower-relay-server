@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import sqlite3
 import ssl
 from datetime import datetime, timedelta, timezone
 from ipaddress import ip_address
@@ -25,6 +26,7 @@ from mower_relay_server.protocol import (
     public_origin,
     validate_response,
 )
+from mower_relay_server.registry import Registry
 from mower_relay_server.server import COOKIE, GATEWAY, create_app, create_tls_context
 
 
@@ -86,7 +88,7 @@ def fixture_gateway(tmp_path):
     ui.mkdir()
     (ui / "index.html").write_text("<h1>Official Mower</h1>")
     (ui / "frontend-routes.json").write_text('["/settings"]')
-    registry = tmp_path / "users.json"
+    registry = tmp_path / "users.sqlite3"
     credential = issue(registry, "alice", subject="qq:alice")
     app = create_app(registry, ui, "s" * 48, "a" * 48)
     return app, registry, credential
@@ -157,7 +159,7 @@ def test_entry_loads_certificate_before_starting_one_https_listener(
     session_file, admin_file = tmp_path / "session.txt", tmp_path / "admin.txt"
     session_file.write_text("s" * 48)
     admin_file.write_text("a" * 48)
-    registry = tmp_path / "users.json"
+    registry = tmp_path / "users.sqlite3"
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -218,7 +220,7 @@ def test_work_directory_initializes_separate_secrets_and_preserves_them(
     assert (data / "session-key.txt").read_bytes() == session
     assert (data / "admin-token.txt").read_bytes() == admin
     gateway = run.call_args.args[0][GATEWAY]
-    assert gateway.registry == (data / "users.json").resolve()
+    assert gateway.registry.path == (data / "users.sqlite3").resolve()
     assert gateway.ui_origin == "https://mower.231240092.xyz"
 
 
@@ -274,12 +276,13 @@ def test_missing_build_and_ambiguous_credential_are_rejected(tmp_path):
             async with browser.ws_connect("/__mower/connect", headers=headers) as agent:
                 await agent.send_json({"op": "hello", "version": 1})
                 assert (await agent.receive(timeout=2)).type == WSMsgType.CLOSE
-            users = json.loads(registry.read_bytes())
-            users["bob"] = users["alice"]
-            registry.write_text(json.dumps(users))
-            with pytest.raises(WSServerHandshakeError) as rejected:
-                await browser.ws_connect("/__mower/connect", headers=headers)
-            assert rejected.value.status == 403
+            with (
+                pytest.raises(sqlite3.IntegrityError),
+                Registry(registry).transaction(write=True) as db,
+            ):
+                db.execute(
+                    "INSERT INTO users SELECT 'bob', '', 1, credential_sha256 FROM users WHERE subdomain='alice'"
+                )
             assert not app[GATEWAY].peers
 
     asyncio.run(scenario())
@@ -474,7 +477,7 @@ def test_admin_api_authentication_subject_queries_and_revocation(tmp_path, monke
             before = registry.read_bytes()
             with monkeypatch.context() as scoped:
                 users = Mock(side_effect=AssertionError("未鉴权时不能读取注册文件"))
-                scoped.setattr(app[GATEWAY], "users", users)
+                scoped.setattr(app[GATEWAY].registry, "transaction", users)
                 for host in (
                     "alice.free.mower.work:58000",
                     "free.mower.work:58002",
@@ -511,12 +514,12 @@ def test_admin_api_authentication_subject_queries_and_revocation(tmp_path, monke
             assert result.status == 201
             issued = await result.json()
             assert len(issued["credential"]) >= 48
-            record = json.loads(registry.read_text())["bob"]
+            record = Registry(registry).get("bob")
             assert (
                 record["credential_sha256"]
                 == hashlib.sha256(issued["credential"].encode()).hexdigest()
             )
-            assert issued["credential"] not in registry.read_text()
+            assert issued["credential"].encode() not in registry.read_bytes()
             assert (
                 await bot.post(
                     "/admin/users",
@@ -534,7 +537,7 @@ def test_admin_api_authentication_subject_queries_and_revocation(tmp_path, monke
             assert (
                 await bot.post("/admin/users/bob/revoke", headers=headers)
             ).status == 200
-            assert json.loads(registry.read_text())["bob"]["enabled"] is False
+            assert not Registry(registry).get("bob")["enabled"]
 
     asyncio.run(scenario())
 
@@ -546,9 +549,9 @@ def test_sessions_are_bound_to_tenant_and_connection_and_login_is_limited(tmp_pa
         app, registry, _ = fixture_gateway(tmp_path)
         issue(registry, "bob", subject="qq:bob")
         gateway = app[GATEWAY]
-        alice = Peer(Mock(closed=False), gateway.admitted("alice"))
+        alice = Peer(Mock(closed=False), await gateway.admitted("alice"))
         alice.ui_build = "a" * 64
-        bob = Peer(Mock(closed=False), gateway.admitted("bob"))
+        bob = Peer(Mock(closed=False), await gateway.admitted("bob"))
         bob.ui_build = "b" * 64
         gateway.peers.update(alice=alice, bob=bob)
         signed = gateway.signer.dumps(
@@ -567,7 +570,7 @@ def test_sessions_are_bound_to_tenant_and_connection_and_login_is_limited(tmp_pa
                     )
                 ).status == 401
                 gateway.peers["alice"] = Peer(
-                    Mock(closed=False), gateway.admitted("alice")
+                    Mock(closed=False), await gateway.admitted("alice")
                 )
                 gateway.peers["alice"].ui_build = "a" * 64
                 assert (await browser.get("/", headers=headers)).status == 401
@@ -634,7 +637,7 @@ def test_gateway_rejects_concurrency_and_traffic_excess_before_dispatch(tmp_path
     async def scenario():
         app, _, _ = fixture_gateway(tmp_path)
         gateway = app[GATEWAY]
-        peer = Peer(Mock(closed=False), gateway.admitted("alice"))
+        peer = Peer(Mock(closed=False), await gateway.admitted("alice"))
         peer.ui_build = "a" * 64
         gateway.peers["alice"] = peer
         signed = gateway.signer.dumps(
@@ -666,7 +669,7 @@ def test_concurrent_admin_processes_issue_a_subdomain_once(tmp_path):
     import subprocess
     import sys
 
-    registry = tmp_path / "users.json"
+    registry = tmp_path / "users.sqlite3"
     command = [
         sys.executable,
         "-m",
@@ -690,7 +693,7 @@ def test_concurrent_admin_processes_issue_a_subdomain_once(tmp_path):
     for process, (_, err) in zip(processes, results):
         if process.returncode:
             assert b"RegistryConflict" in err
-    record = json.loads(registry.read_bytes())["trial"]
+    record = Registry(registry).get("trial")
     assert record["credential_sha256"] == hashlib.sha256(issued[0]).hexdigest()
 
 
@@ -711,6 +714,7 @@ def test_rename_keeps_credentials_and_moves_a_connected_agent(tmp_path):
             async with api.ws_connect("/__mower/connect", headers=auth) as old:
                 await old.send_json(hello)
                 assert (await old.receive_json())["subdomain"] == "alice"
+                previous = dict(Registry(registry).get("alice"))
                 before = registry.read_bytes()
                 for action, payload in (
                     ("rename", {"subdomain": "new-name", "subject": "qq:other"}),
@@ -739,9 +743,11 @@ def test_rename_keeps_credentials_and_moves_a_connected_agent(tmp_path):
                     "connected": False,
                     "url": public_origin("new-name"),
                 }
-            records = json.loads(registry.read_bytes())
-            assert records["new-name"] == json.loads(before)["alice"]
-            assert "alice" not in records
+            assert dict(Registry(registry).get("new-name")) == {
+                **previous,
+                "subdomain": "new-name",
+            }
+            assert Registry(registry).get("alice") is None
             headers = {
                 "Host": "alice.free.mower.work:58000",
                 "Cookie": f"{COOKIE}={cookie}",

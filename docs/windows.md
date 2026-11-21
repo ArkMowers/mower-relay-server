@@ -23,7 +23,7 @@ py -3.12 -m venv .relay-venv
 .\start.ps1
 ```
 
-首次启动在 `.\data` 生成会话签名密钥和管理 API 密钥，并初始化注册文件。通过 Windows 文件权限只允许服务账号和管理员访问此目录；不要把它放在网关静态目录内。将该命令配置为服务或任务计划中的长期进程，工作目录设为管理员选择的仓库根目录；配置失败退出后由管理员检查，不通过无条件重启掩盖错误。
+首次启动在 `.\data` 生成会话签名密钥和管理 API 密钥，并初始化 SQLite 凭据数据库（已有安装见 [SQLite 升级步骤](../README.md#已有网关升级到-sqlite)）。通过 Windows 文件权限只允许服务账号和管理员访问此目录；不要把它放在网关静态目录内。将该命令配置为服务或任务计划中的长期进程，工作目录设为管理员选择的仓库根目录；配置失败退出后由管理员检查，不通过无条件重启掩盖错误。
 
 启动脚本直接加载已有证书和私钥，路径相对于工作目录：
 
@@ -75,8 +75,8 @@ HTTP 403 表示管理密钥无效；400 表示输入无效；404 表示用户不
 停止网关后也可使用本地 CLI 签发或吊销：
 
 ```powershell
-.\.relay-venv\Scripts\python.exe -m mower_relay_server.admin --registry .\data\users.json issue alice
-.\.relay-venv\Scripts\python.exe -m mower_relay_server.admin --registry .\data\users.json revoke alice
+.\.relay-venv\Scripts\python.exe -m mower_relay_server.admin --registry .\data\users.sqlite3 issue alice
+.\.relay-venv\Scripts\python.exe -m mower_relay_server.admin --registry .\data\users.sqlite3 revoke alice
 ```
 
 ## 4. 用户启用与部署验收

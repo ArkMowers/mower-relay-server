@@ -5,19 +5,13 @@ import hmac
 
 from aiohttp import web
 
-from mower_relay_server.admin import (
-    RegistryConflict,
-    initialize_registry,
-    issue,
-    rename,
-    revoke,
-)
 from mower_relay_server.protocol import (
     DOMAIN,
     PORT,
     public_origin,
     valid_subdomain,
 )
+from mower_relay_server.registry import RegistryConflict
 
 
 def install_admin_routes(app, gateway, token, entry):
@@ -28,15 +22,15 @@ def install_admin_routes(app, gateway, token, entry):
         peer = gateway.peers.get(name)
         return {
             "subdomain": name,
-            "subject": record.get("subject", ""),
-            "enabled": record.get("enabled") is True,
+            "subject": record["subject"],
+            "enabled": bool(record["enabled"]),
             "connected": bool(peer and peer.ui_build and not peer.ws.closed),
             "url": public_origin(name),
         }
 
     async def get_user(request, name):
-        record = gateway.users().get(name)
-        if not isinstance(record, dict) or not valid_subdomain(name):
+        record = await asyncio.to_thread(gateway.registry.get, name)
+        if record is None:
             raise web.HTTPNotFound()
         return web.json_response(summary(name, record))
 
@@ -47,21 +41,11 @@ def install_admin_routes(app, gateway, token, entry):
             limit = max(1, min(100, int(request.query.get("limit", "50"))))
         except ValueError:
             raise web.HTTPBadRequest() from None
-        users = [
-            (name, record)
-            for name, record in sorted(gateway.users().items())
-            if isinstance(record, dict)
-            and valid_subdomain(name)
-            and (subject is None or record.get("subject") == subject)
-        ]
+        total, users = await asyncio.to_thread(
+            gateway.registry.page, subject, offset, limit
+        )
         return web.json_response(
-            {
-                "users": [
-                    summary(name, record)
-                    for name, record in users[offset : offset + limit]
-                ],
-                "total": len(users),
-            }
+            {"users": [summary(row["subdomain"], row) for row in users], "total": total}
         )
 
     async def issue_user(request):
@@ -79,7 +63,7 @@ def install_admin_routes(app, gateway, token, entry):
         ):
             raise web.HTTPBadRequest()
         try:
-            credential = await asyncio.to_thread(issue, gateway.registry, name, subject)
+            credential = await asyncio.to_thread(gateway.registry.issue, name, subject)
         except RegistryConflict as exc:
             raise web.HTTPConflict(text=str(exc)) from None
         return web.json_response(
@@ -109,20 +93,16 @@ def install_admin_routes(app, gateway, token, entry):
         if not valid_subdomain(target):
             raise web.HTTPBadRequest(text="需要有效的新子域名 subdomain")
         try:
-            if rename_to_new:
-                record = await asyncio.to_thread(
-                    rename, gateway.registry, name, target, subject
-                )
-            else:
-                record = await asyncio.to_thread(
-                    revoke, gateway.registry, name, subject
-                )
+            record = await asyncio.to_thread(
+                gateway.registry.update,
+                name,
+                subject,
+                target if rename_to_new else None,
+            )
         except KeyError:
             raise web.HTTPNotFound(text="子域名不存在") from None
         except RegistryConflict as exc:
             raise web.HTTPConflict(text=str(exc)) from None
-        except (OSError, ValueError):
-            raise web.HTTPServiceUnavailable(text="注册文件不可用") from None
         if target != name or not rename_to_new:
             peer = gateway.peers.get(name)
             if peer and peer.credential_digest == record["credential_sha256"]:
@@ -147,7 +127,7 @@ def install_admin_routes(app, gateway, token, entry):
         return web.json_response({"path": entry.path})
 
     async def initialize(app):
-        await asyncio.to_thread(initialize_registry, gateway.registry)
+        await asyncio.to_thread(gateway.registry.initialize)
 
     app.on_startup.append(initialize)
     routes = web.UrlDispatcher()

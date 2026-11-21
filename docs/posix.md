@@ -21,7 +21,7 @@ sh ./start.sh
 .relay-venv/bin/mower-relay-server --work-dir .
 ```
 
-首次启动自动创建 `data/session-key.txt`、`data/admin-token.txt` 和 `data/users.json`。密钥文件在 POSIX 系统上以仅属主可读写的权限创建；证书、私钥及工作目录的权限由管理员维护。保留 `data` 可保留已有用户和管理密钥。仅放行入站 TCP 58000，服务不提供明文 HTTP 入口，也不需要其他代理监听端口。
+已有安装按 [SQLite 升级步骤](../README.md#已有网关升级到-sqlite) 迁移。首次启动自动创建 `data/session-key.txt`、`data/admin-token.txt` 和 `data/users.sqlite3`。密钥文件在 POSIX 系统上以仅属主可读写的权限创建；证书、私钥及工作目录的权限由管理员维护。保留 `data` 可保留已有用户和管理密钥。仅放行入站 TCP 58000，服务不提供明文 HTTP 入口，也不需要其他代理监听端口。
 
 ## Linux systemd
 

@@ -2,7 +2,7 @@
 
 管理 API 与用户 HTTPS/WSS 共用 TCP 58000，默认入口为 `https://free.mower.work:58000/admin/`。所有请求携带 `Authorization: Bearer <管理密钥>`，密钥来自工作目录的 `data/admin-token.txt`，通过可信渠道配置到异机 bot 的环境变量或秘密存储。它与用户准入凭据、实例 token、浏览器 Cookie 不同。
 
-服务先检查主域名及固定端口的 Host 和独立管理密钥，再解析输入或读写注册文件。请求体最多 4 KiB。QQ 用户身份验证和是否通过审核由 bot 判断，持有管理密钥的程序可以签发凭据、修改子域名及吊销凭据。
+服务先检查主域名及固定端口的 Host 和独立管理密钥，再解析输入或读写凭据数据库。请求体最多 4 KiB。QQ 用户身份验证和是否通过审核由 bot 判断，持有管理密钥的程序可以签发凭据、修改子域名及吊销凭据。
 
 以下路径相对于当前管理入口。
 
@@ -24,7 +24,7 @@
 
 返回状态包括 `subdomain`、`subject`、`enabled`、`connected`、`url`；签发时另返回 `credential`，其原值只返回一次。查询不返回原值或摘要。bot 将凭据私下交付给已审核用户。超时后先查询状态，不能假定签发失败；需要重新领取时先明确吊销再签发，不能覆盖仍启用的名称。
 
-403 表示鉴权失败，400 表示输入无效，404 表示入口、Host 或用户不存在，409 表示名称占用、归属冲突或凭据已吊销，413 表示请求体超限，429 表示入口限流。注册文件不可读返回 503，不使用默认名单继续授权。
+403 表示鉴权失败，400 表示输入无效，404 表示入口、Host 或用户不存在，409 表示名称占用、归属冲突或凭据已吊销，413 表示请求体超限，429 表示入口限流。凭据数据库不可读返回 503，不使用默认名单继续授权。
 
 ## 网关管理页面
 
@@ -32,7 +32,7 @@
 
 点击 **管理入口**，填写本站路径（例如 `/ops-mower/`）并保存。当前网页随即切换到新地址，管理 API 同时迁移，例如凭据列表变为 `/ops-mower/users`。旧网页和旧 API 立即返回 404。请更新书签、bot 的 `MOWER_RELAY_ADMIN_PATH` 和其他本机工具的登录路径。已签发的中转凭据继续有效。
 
-网关将路径保存在注册文件旁的 `admin-entry.json`，重启后继续使用。忘记入口时可在服务器上查看该文件，首次设置前使用默认的 `/admin/`。
+网关将路径保存在凭据数据库旁的 `admin-entry.json`，重启后继续使用。忘记入口时可在服务器上查看该文件，首次设置前使用默认的 `/admin/`。
 
 ## 本机凭据管理页面
 
@@ -77,4 +77,4 @@ def rename_for_qq(qq_id, old_name, new_name):
 
 Windows PowerShell 的完整调用示例见[部署指南](windows.md#3-qqbot-管理-api)。Linux/macOS 可使用支持 HTTPS 的任意 bot HTTP 客户端，始终校验证书。管理服务不记录请求体或 Authorization，bot 也应避免把密钥和准入凭据写入日志。
 
-本地 CLI 仅在停止服务时维护注册文件：`mower-relay-admin --registry <工作目录>/data/users.json issue alice` 或 `revoke alice`。服务运行时使用管理 API，以免多个进程同时替换注册文件。
+本地 CLI 仅在停止服务时维护凭据数据库：`mower-relay-admin --registry <工作目录>/data/users.sqlite3 issue alice` 或 `revoke alice`。服务运行时使用管理 API，以便网关在改名或吊销后立即断开现有连接。
