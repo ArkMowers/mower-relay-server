@@ -820,3 +820,19 @@ def test_relay_copilot_library_methods():
             for method in ("HEAD", "GET", "POST", "PUT", "PATCH", "DELETE")
             if allowed_request(method, path)
         } == expected
+
+
+def test_relay_only_forwards_event_rerun_progress_reads_and_edits():
+
+    base = "/maa-long-task-status"
+    for query, methods in [
+        ("?kind=event_rerun", {"GET", "PATCH"}),
+        ("", set()),
+        ("?kind=copilot", set()),
+        ("?kind=event_rerun&kind=copilot", set()),
+    ]:
+        assert {
+            method
+            for method in ("GET", "HEAD", "POST", "PATCH", "DELETE", "PUT")
+            if allowed_request(method, base + query)
+        } == methods
