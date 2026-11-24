@@ -765,3 +765,58 @@ def test_rename_keeps_credentials_and_moves_a_connected_agent(tmp_path):
             assert (await change("another")).status == 404
 
     asyncio.run(scenario())
+
+
+def test_relay_confirmed_device_start_methods():
+    routes = {
+        "/device/avd/start": {"POST"},
+        "/device/redroid/start": {"POST"},
+        "/device/genymotion/start": {"POST"},
+        "/device/other/start": set(),
+        "/device/avd/stop": set(),
+    }
+    for path, expected in routes.items():
+        assert {
+            method
+            for method in ("HEAD", "GET", "POST", "PUT", "PATCH", "DELETE")
+            if allowed_request(method, path)
+        } == expected
+
+
+def test_relay_maa_update_operation_methods():
+    routes = {
+        "/maa-update/info": {"GET"},
+        "/maa-update/status": {"GET"},
+        "/maa-update/check": set(),
+        "/maa-update/start": set(),
+        "/maa-resource-update/info": {"GET"},
+        "/maa-resource-update/status": {"GET"},
+        "/maa-resource-update/check": set(),
+        "/maa-resource-update/start": set(),
+        "/maa-other-update/info": set(),
+        "/maa-update/mirrorchyan-status": set(),
+    }
+    for path, expected in routes.items():
+        assert {
+            method
+            for method in ("HEAD", "GET", "POST", "PUT", "PATCH", "DELETE")
+            if allowed_request(method, path)
+        } == expected
+
+
+def test_relay_copilot_library_methods():
+    routes = {
+        "/sss-copilot": {"GET", "POST"},
+        "/maa-copilot": set(),
+        "/maa-paradox": set(),
+        "/other-copilot": set(),
+        "/sss-copilot/" + "a" * 64: set(),
+        "/maa-copilot/" + "a" * 64: set(),
+        "/maa-paradox/" + "a" * 64: set(),
+    }
+    for path, expected in routes.items():
+        assert {
+            method
+            for method in ("HEAD", "GET", "POST", "PUT", "PATCH", "DELETE")
+            if allowed_request(method, path)
+        } == expected
