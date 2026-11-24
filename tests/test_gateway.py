@@ -48,27 +48,6 @@ def test_generic_proxy_and_local_management_paths_are_absent(method, path):
     assert not allowed_request(method, path)
 
 
-def test_conversation_routes_match_only_the_supported_operations():
-    item = "/ai/conversations/" + "a" * 32
-    routes = {
-        "/ai/conversations": {"GET", "DELETE"},
-        item: {"GET", "DELETE"},
-        item + "/summary": {"POST"},
-        item + "/turns/12/control": {"POST"},
-        item + "/turns/x/control": set(),
-        item + "/turns/12": set(),
-        item + "/settings": set(),
-        "/ai/conversations/unknown": set(),
-        "/ai/attachments": set(),
-    }
-    for path, allowed in routes.items():
-        assert {
-            m
-            for m in ("GET", "POST", "DELETE", "PUT", "PATCH")
-            if allowed_request(m, path)
-        } == allowed
-
-
 def test_relay_rejects_remote_web_content_and_oversized_responses():
     for mime, content in (
         ("text/html", b"<html>other site</html>"),
@@ -430,15 +409,19 @@ def test_gateway_requires_individual_admission_and_local_login_before_http(tmp_p
                     )
                 ).status == 200
                 assert (
-                    await browser.get("/not-a-mower-operation", headers=headers)
+                    await browser.get("/dialog/folder", headers=headers)
                 ).status == 404
                 request_task = asyncio.create_task(
                     browser.get(
-                        "/status", headers={**headers, "token": "local-instance-token"}
+                        "/future-feature/status",
+                        headers={**headers, "token": "local-instance-token"},
                     )
                 )
                 operation = await agent.receive_json(timeout=2)
-                assert operation["op"] == "request" and operation["path"] == "/status"
+                assert (
+                    operation["op"] == "request"
+                    and operation["path"] == "/future-feature/status"
+                )
                 assert operation["headers"]["token"] == "local-instance-token"
                 await agent.send_json(
                     {
@@ -767,56 +750,48 @@ def test_rename_keeps_credentials_and_moves_a_connected_agent(tmp_path):
     asyncio.run(scenario())
 
 
-def test_relay_confirmed_device_start_methods():
-    routes = {
-        "/device/avd/start": {"POST"},
-        "/device/redroid/start": {"POST"},
-        "/device/genymotion/start": {"POST"},
-        "/device/other/start": set(),
-        "/device/avd/stop": set(),
-    }
-    for path, expected in routes.items():
-        assert {
-            method
-            for method in ("HEAD", "GET", "POST", "PUT", "PATCH", "DELETE")
-            if allowed_request(method, path)
-        } == expected
+@pytest.mark.parametrize(
+    "method,path,expected",
+    [
+        ("GET", "/future-feature/status", True),
+        ("PATCH", "/stage/event-rerun", True),
+        ("POST", "/maa-copilot", True),
+        ("DELETE", "/weekly-plans/%E5%91%A8%E4%B8%80", True),
+        ("HEAD", "/process-control/info", True),
+        ("GET", "/config-backup/export", True),
+        ("GET", "/maa-resource-update/status", True),
+        ("POST", "/maa-update/start", False),
+        ("POST", "/software-update/start", False),
+        ("GET", "/software-update/source/history", False),
+        ("POST", "/resource/install", False),
+        ("POST", "/config-backup/import", False),
+        ("POST", "/config-profiles/import", False),
+        ("POST", "/process-control/action", False),
+        ("GET", "/dialog/folder", False),
+        ("POST", "/relay/settings", False),
+        ("GET", "/instances", False),
+        ("POST", "/process-control/%61ction", False),
+        ("POST", "///conf", False),
+        ("GET", "/a%2Fb", False),
+        ("GET", "/%252e%252e", False),
+        ("GET", "/test%0dname", False),
+        ("GET", "/%ff", False),
+        ("GET", "/ws/chat", False),
+        ("CONNECT", "/future-feature/status", False),
+    ],
+)
+def test_relay_forwards_business_paths_and_excludes_local_management(
+    method, path, expected
+):
+    assert allowed_request(method, path) is expected
 
 
-def test_relay_maa_update_operation_methods():
-    routes = {
-        "/maa-update/info": {"GET"},
-        "/maa-update/status": {"GET"},
-        "/maa-update/check": set(),
-        "/maa-update/start": set(),
-        "/maa-resource-update/info": {"GET"},
-        "/maa-resource-update/status": {"GET"},
-        "/maa-resource-update/check": set(),
-        "/maa-resource-update/start": set(),
-        "/maa-other-update/info": set(),
-        "/maa-update/mirrorchyan-status": set(),
-    }
-    for path, expected in routes.items():
-        assert {
-            method
-            for method in ("HEAD", "GET", "POST", "PUT", "PATCH", "DELETE")
-            if allowed_request(method, path)
-        } == expected
-
-
-def test_relay_copilot_library_methods():
-    routes = {
-        "/sss-copilot": {"GET", "POST"},
-        "/maa-copilot": set(),
-        "/maa-paradox": set(),
-        "/other-copilot": set(),
-        "/sss-copilot/" + "a" * 64: set(),
-        "/maa-copilot/" + "a" * 64: set(),
-        "/maa-paradox/" + "a" * 64: set(),
-    }
-    for path, expected in routes.items():
-        assert {
-            method
-            for method in ("HEAD", "GET", "POST", "PUT", "PATCH", "DELETE")
-            if allowed_request(method, path)
-        } == expected
+def test_relay_validates_head_and_download_responses():
+    validate_response("/stage/event-rerun", 200, "application/json", b"", method="HEAD")
+    with pytest.raises(ValueError):
+        validate_response(
+            "/stage/event-rerun", 200, "application/json", b"{}", method="HEAD"
+        )
+    validate_response("/config-backup/export", 200, "application/zip", b"PK\x03\x04")
+    with pytest.raises(ValueError):
+        validate_response("/future-feature/export", 200, "text/html", b"<html></html>")
