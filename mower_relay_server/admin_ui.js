@@ -115,6 +115,15 @@ function render() {
     state.className = 'state ' + (!user.enabled ? 'revoked' : user.connected ? 'online' : '')
     state.textContent = !user.enabled ? '已吊销' : user.connected ? '已连接' : '未连接'
     row.insertCell().append(state)
+    const traffic = row.insertCell()
+    if (user.daily_traffic) {
+      const { used_bytes, limit_bytes, state } = user.daily_traffic
+      const mib = (bytes) => (bytes / (1024 * 1024)).toLocaleString('zh-CN', { maximumFractionDigits: 1 })
+      const alert = { warning: ' · 用量预警', limited: ' · 今日已限额' }[state] || ''
+      traffic.textContent = `${mib(used_bytes)} / ${mib(limit_bytes)} MiB${alert}`
+    } else {
+      traffic.textContent = '—'
+    }
     const actions = row.insertCell()
     if (user.enabled) {
       actions.append(

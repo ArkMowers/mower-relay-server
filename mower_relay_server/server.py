@@ -5,6 +5,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -37,10 +38,24 @@ from mower_relay_server.protocol import (
     valid_subdomain,
     validate_response,
 )
-from mower_relay_server.registry import Registry
+from mower_relay_server.registry import (
+    Registry,
+    RegistryConflict,
+    daily_usage,
+    quota_day,
+)
 
 BUILD = re.compile(r"[a-f0-9]{64}")
 DEFAULT_UI_ORIGIN = "https://mower.231240092.xyz"
+
+DEFAULT_DAILY_QUOTA_MIB = 1024
+logger = logging.getLogger(__name__)
+
+
+class DailyQuotaExceeded(web.HTTPTooManyRequests):
+    def __init__(self):
+        super().__init__(text="当日中转流量已达上限，请在北京时间零点后重试")
+
 
 BASIC_CHALLENGE = 'Basic realm="Mower", charset="UTF-8"'
 
@@ -66,7 +81,9 @@ def html_navigation(request):
 
 
 class Peer:
-    def __init__(self, ws, credential_digest):
+    def __init__(self, ws, credential_digest, name, gateway):
+        self.name = name
+        self.gateway = gateway
         self.credential_digest = credential_digest
         self.ws = ws
         self.generation = secrets.token_hex(16)
@@ -87,6 +104,35 @@ class Peer:
         if self.bytes > 64 * 1024 * 1024:
             raise web.HTTPTooManyRequests(text="每分钟流量超过限制")
 
+    async def account(self, size):
+        limit = self.gateway.daily_limit
+        try:
+            allowed, transition, used, day = await asyncio.to_thread(
+                self.gateway.registry.charge_traffic,
+                self.name,
+                self.credential_digest,
+                size,
+                limit,
+            )
+        except RegistryConflict:
+            raise web.HTTPForbidden() from None
+        if transition:
+            logger.warning(
+                "中转日配额 %s | subdomain=%s day=%s used_bytes=%d limit_bytes=%d",
+                transition,
+                self.name,
+                day,
+                used,
+                limit,
+            )
+        if not allowed:
+            raise DailyQuotaExceeded()
+
+    async def send(self, message):
+        text = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
+        await self.account(len(text.encode("utf-8")))
+        await self.ws.send_str(text)
+
     async def request(self, message, kind, timeout=30):
         if len(self.pending) >= MAX_PENDING:
             raise web.HTTPTooManyRequests()
@@ -100,7 +146,7 @@ class Peer:
         future = asyncio.get_running_loop().create_future()
         self.pending[key] = (kind, message, future)
         try:
-            await asyncio.wait_for(self.ws.send_json({**message, "id": key}), 5)
+            await asyncio.wait_for(self.send({**message, "id": key}), 5)
             return await asyncio.wait_for(future, timeout)
         except (TimeoutError, ConnectionError):
             raise web.HTTPGatewayTimeout() from None
@@ -109,7 +155,10 @@ class Peer:
 
 
 class Gateway:
-    def __init__(self, registry, session_key, ui_origin):
+    def __init__(self, registry, session_key, ui_origin, daily_quota_mib):
+        if type(daily_quota_mib) is not int or not 1 <= daily_quota_mib < 2**43:
+            raise ValueError("日配额须为正整数 MiB，且小于 2^43 MiB")
+        self.daily_limit = daily_quota_mib * 1024**2
         self.registry = Registry(registry)
         if len(session_key) < 32:
             raise ValueError("网关会话密钥至少需要 32 个字符")
@@ -134,6 +183,8 @@ class Gateway:
         record = await asyncio.to_thread(self.registry.get, name)
         if record is None or not record["enabled"]:
             raise web.HTTPForbidden()
+        if daily_usage(record, quota_day())[1] == "limited":
+            raise DailyQuotaExceeded()
         return record["credential_sha256"]
 
     def tenant(self, request):
@@ -179,15 +230,23 @@ class Gateway:
         name = await asyncio.to_thread(self.registry.identify, digest)
         if name is None:
             raise web.HTTPForbidden()
+        if await self.admitted(name) != digest:
+            raise web.HTTPForbidden()
         if name in self.peers:
             raise web.HTTPConflict(text="实例已经连接")
         # Reserve the domain before the first await to prevent duplicate admission.
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=MAX_FRAME, compress=False)
-        peer = Peer(ws, digest)
+        peer = Peer(ws, digest, name, self)
         self.peers[name] = peer
         try:
             await ws.prepare(request)
-            hello = await ws.receive_json(timeout=10)
+            first = await ws.receive(timeout=10)
+            if first.type == WSMsgType.BINARY:
+                await peer.account(len(first.data))
+            if first.type != WSMsgType.TEXT:
+                raise ValueError("握手需要文本帧")
+            await peer.account(len(first.data.encode("utf-8")))
+            hello = json.loads(first.data)
             if (
                 not isinstance(hello, dict)
                 or hello.get("op") != "hello"
@@ -198,7 +257,7 @@ class Gateway:
             if not isinstance(build, str) or not BUILD.fullmatch(build):
                 raise ValueError("前端构建标识无效")
             peer.ui_build = build
-            await ws.send_json(
+            await peer.send(
                 {
                     "op": "ready",
                     "version": VERSION,
@@ -207,11 +266,13 @@ class Gateway:
                 }
             )
             async for frame in ws:
+                if frame.type == WSMsgType.BINARY:
+                    await peer.account(len(frame.data))
                 if frame.type != WSMsgType.TEXT:
                     break
-                if await self.admitted(name) != digest:
-                    break
-                peer.charge(len(frame.data.encode()))
+                size = len(frame.data.encode("utf-8"))
+                peer.charge(size)
+                await peer.account(size)
                 message = json.loads(frame.data)
                 key, op = message.get("id"), message.get("op")
                 if op in {"response", "authenticated", "error"} and key in peer.pending:
@@ -257,6 +318,11 @@ class Gateway:
                     "ws_close",
                 }:
                     raise ValueError("非预期消息")
+        except DailyQuotaExceeded:
+            for _, _, future in peer.pending.values():
+                if not future.done():
+                    future.set_exception(DailyQuotaExceeded())
+            await ws.close(code=1008, message=b"daily quota exceeded")
         except (
             ValueError,
             TypeError,
@@ -366,21 +432,21 @@ class Gateway:
             peer.sockets[key] = socket
             try:
                 await socket.prepare(request)
-                await peer.ws.send_json(
-                    {"op": "ws_open", "id": key, "path": request.path}
-                )
+                await peer.send({"op": "ws_open", "id": key, "path": request.path})
                 async for frame in socket:
                     if await self.peer(name) is not peer:
                         break
                     if frame.type != WSMsgType.TEXT:
                         break
                     peer.charge(len(frame.data.encode()))
-                    await peer.ws.send_json(
-                        {"op": "ws_data", "id": key, "data": frame.data}
-                    )
+                    await peer.send({"op": "ws_data", "id": key, "data": frame.data})
+            except DailyQuotaExceeded:
+                await socket.close(code=1008, message=b"daily quota exceeded")
+                await peer.ws.close(code=1008, message=b"daily quota exceeded")
             finally:
                 peer.sockets.pop(key, None)
                 if not peer.ws.closed:
+                    # Closing a subscription carries no application data and must work at quota.
                     await peer.ws.send_json({"op": "ws_close", "id": key})
             return socket
         if request.method in {"GET", "HEAD"} and (
@@ -433,8 +499,16 @@ class Gateway:
         return response
 
 
-def create_app(registry, ui, session_key, admin_token, *, ui_origin=DEFAULT_UI_ORIGIN):
-    gateway = Gateway(registry, session_key, ui_origin)
+def create_app(
+    registry,
+    ui,
+    session_key,
+    admin_token,
+    *,
+    ui_origin=DEFAULT_UI_ORIGIN,
+    daily_quota_mib=DEFAULT_DAILY_QUOTA_MIB,
+):
+    gateway = Gateway(registry, session_key, ui_origin, daily_quota_mib)
     traffic = OrderedDict()
 
     @web.middleware
@@ -530,6 +604,12 @@ def main():
     parser.add_argument("--registry", type=Path)
     parser.add_argument("--ui", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--ui-origin")
+    parser.add_argument(
+        "--daily-quota-mib",
+        type=int,
+        default=DEFAULT_DAILY_QUOTA_MIB,
+        help="每个凭据每天可转发的 MiB 数（北京时间零点重置）",
+    )
     parser.add_argument("--session-key-file", type=Path)
     parser.add_argument("--admin-token-file", type=Path)
     parser.add_argument("--cert-file", type=Path)
@@ -550,6 +630,7 @@ def main():
         location(args.ui, "ui-dist"),
         read_or_create_secret(location(args.session_key_file, "data/session-key.txt")),
         read_or_create_secret(location(args.admin_token_file, "data/admin-token.txt")),
+        daily_quota_mib=args.daily_quota_mib,
         ui_origin=args.ui_origin
         or (
             (work_dir / "ui-origin.txt").read_text("utf-8-sig").strip()

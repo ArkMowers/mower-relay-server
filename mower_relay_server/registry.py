@@ -7,9 +7,31 @@ import re
 import secrets
 import sqlite3
 from contextlib import closing, contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from mower_relay_server.protocol import valid_subdomain
+
+QUOTA_ZONE = timezone(timedelta(hours=8))
+
+
+def quota_day():
+    return datetime.now(QUOTA_ZONE).date().isoformat()
+
+
+def daily_usage(row, day):
+    if row["traffic_day"] == day:
+        return row["traffic_bytes"], row["traffic_state"]
+    return 0, "normal"
+
+
+def install_daily_usage(db):
+    db.execute("ALTER TABLE users ADD COLUMN traffic_day TEXT")
+    db.execute("ALTER TABLE users ADD COLUMN traffic_bytes INTEGER NOT NULL DEFAULT 0")
+    db.execute(
+        "ALTER TABLE users ADD COLUMN traffic_state TEXT NOT NULL DEFAULT 'normal'"
+    )
+    db.execute("PRAGMA user_version=3")
 
 
 class RegistryConflict(ValueError):
@@ -59,9 +81,11 @@ class Registry:
         archive = self.legacy.with_name(self.legacy.name + ".migrated")
         with self.transaction(write=True) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version == 2:
+            if version in (2, 3):
                 if self.legacy.exists():
                     raise ValueError("SQLite 已启用，但发现旧注册文件，请核对数据目录")
+                if version == 2:
+                    install_daily_usage(db)
                 return
             if version not in (0, 1):
                 raise ValueError("不支持的凭据数据库版本")
@@ -83,7 +107,7 @@ class Registry:
                     "CREATE UNIQUE INDEX active_digest ON users(credential_sha256) WHERE enabled=1"
                 )
                 if not self.legacy.exists():
-                    db.execute("PRAGMA user_version=2")
+                    install_daily_usage(db)
                     return
                 self._import(db)
                 db.execute("PRAGMA user_version=1")
@@ -94,7 +118,7 @@ class Registry:
                     raise ValueError("凭据已导入，请核对旧注册文件及迁移备份")
                 if self.legacy.exists():
                     self.legacy.rename(archive)
-                db.execute("PRAGMA user_version=2")
+                install_daily_usage(db)
 
     def _import(self, db):
         users = json.loads(
@@ -133,12 +157,40 @@ class Registry:
             ).fetchone()
             return row[0] if row else None
 
+    def charge_traffic(self, name, digest, size, limit):
+        """Reserve a whole message before forwarding it; serialize charges across peers."""
+        with self.transaction(write=True) as db:
+            day = quota_day()
+            row = db.execute(
+                "SELECT traffic_day,traffic_bytes,traffic_state FROM users "
+                "WHERE subdomain=? AND credential_sha256=? AND enabled=1",
+                (name, digest),
+            ).fetchone()
+            if row is None:
+                raise RegistryConflict("中转凭据已失效")
+            used, previous = daily_usage(row, day)
+            if previous == "limited":
+                return False, None, used, day
+            allowed = used + size <= limit
+            if allowed:
+                used += size
+            state = previous
+            if not allowed or used == limit:
+                state = "limited"
+            elif used * 5 >= limit * 4:
+                state = "warning"
+            db.execute(
+                "UPDATE users SET traffic_day=?,traffic_bytes=?,traffic_state=? WHERE subdomain=?",
+                (day, used, state, name),
+            )
+            return allowed, state if state != previous else None, used, day
+
     def page(self, subject, offset, limit):
         where, args = ("", ()) if subject is None else (" WHERE subject=?", (subject,))
         with self.transaction() as db:
             total = db.execute("SELECT count(*) FROM users" + where, args).fetchone()[0]
             rows = db.execute(
-                "SELECT subdomain,subject,enabled FROM users"
+                "SELECT subdomain,subject,enabled,traffic_day,traffic_bytes,traffic_state FROM users"
                 + where
                 + " ORDER BY subdomain LIMIT ? OFFSET ?",
                 (*args, limit, min(offset, total)),
@@ -154,7 +206,8 @@ class Registry:
             db.execute("DELETE FROM users WHERE subdomain=? AND enabled=0", (name,))
             try:
                 db.execute(
-                    "INSERT INTO users VALUES (?,?,1,?)", (name, subject, digest)
+                    "INSERT INTO users(subdomain,subject,enabled,credential_sha256) VALUES (?,?,1,?)",
+                    (name, subject, digest),
                 )
             except sqlite3.IntegrityError:
                 raise RegistryConflict("子域名或用户已启用") from None
@@ -189,4 +242,7 @@ class Registry:
                 "subject": row["subject"],
                 "enabled": target is not None,
                 "credential_sha256": row["credential_sha256"],
+                "traffic_day": row["traffic_day"],
+                "traffic_bytes": row["traffic_bytes"],
+                "traffic_state": row["traffic_state"],
             }

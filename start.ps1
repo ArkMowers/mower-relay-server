@@ -2,7 +2,8 @@ param(
     [string]$DataDirectory = "data",
     [string]$UiDirectory = "ui-dist",
     [string]$CertificateFile = "certificates\free.mower.work.crt",
-    [string]$PrivateKeyFile = "certificates\free.mower.work.key"
+    [string]$PrivateKeyFile = "certificates\free.mower.work.key",
+    [long]$DailyQuotaMiB = 1024
 )
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -17,5 +18,5 @@ $AdminToken = Join-Path $DataDirectory "admin-token.txt"
     --work-dir $PSScriptRoot `
     --registry (Join-Path $DataDirectory "users.sqlite3") `
     --ui $UiDirectory --session-key-file $SessionKey --admin-token-file $AdminToken `
-    --cert-file $CertificateFile --key-file $PrivateKeyFile
+    --cert-file $CertificateFile --key-file $PrivateKeyFile --daily-quota-mib $DailyQuotaMiB
 if ($LASTEXITCODE -ne 0) { throw "Mower relay exited: $LASTEXITCODE" }

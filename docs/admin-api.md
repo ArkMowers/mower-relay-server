@@ -38,6 +38,8 @@ curl.exe -sS -i --max-time 10 -H "Authorization: Bearer %MOWER_RELAY_ADMIN_TOKEN
 
 返回状态包括 `subdomain`、`subject`、`enabled`、`connected`、`url`；签发时另返回 `credential`，其原值只返回一次。查询不返回原值或摘要。bot 将凭据私下交付给已审核用户。超时后先查询状态，不能假定签发失败；需要重新领取时先明确吊销再签发，不能覆盖仍启用的名称。
 
+凭据状态中的 `daily_traffic` 包含北京时间日期 `day`、已扣字节数 `used_bytes`、当前日额度 `limit_bytes` 和状态 `state`。状态为 `normal`（正常）、`warning`（达到预警线）或 `limited`（当天暂停）。管理页面刷新列表即可查看；bot 可以沿用已有的用户查询接口。流量不足以转发整条消息也会暂停，因此暂停时已扣字节数可能小于额度。详见[凭据日流量配额](architecture.md#凭据日流量配额)。
+
 403 表示鉴权失败，400 表示输入无效，404 表示入口、Host 或用户不存在，409 表示名称占用、归属冲突或凭据已吊销，413 表示请求体超限，429 表示入口限流。凭据数据库不可读返回 503，不使用默认名单继续授权。
 
 ## 网关管理页面
