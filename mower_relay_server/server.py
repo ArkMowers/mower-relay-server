@@ -233,6 +233,7 @@ class Gateway:
                             message.get("status"),
                             message.get("mime"),
                             body,
+                            method=original["method"],
                         )
                         future.set_result((message["status"], message["mime"], body))
                     else:

@@ -6,7 +6,7 @@ Mower 专用的 HTTPS/WSS 中转服务，独立于 [Arknights Mower](https://git
 - 内置客户端连接：`wss://free.mower.work:58000/__mower/connect`。
 - 异机 bot 管理 API 默认入口：`https://free.mower.work:58000/admin/`，使用独立 Bearer 管理密钥。
 - 管理员审核后发放独立凭据。Mower 用户名、密码校验值和实例 token 由本地 Mower 保存及验证。
-- 服务端只分派明确允许的 Mower 操作，不接受目标地址、端口或通用 TCP 流。前端静态文件由浏览器从 R2 直接读取。
+- 服务端将业务请求转给当前连接的 Mower 实例，本机管理操作由网关和实例共同拦截。协议不接受转发目的地址或端口。前端静态文件由浏览器从 R2 直接读取。
 
 本项目实现协议 v1，需配合具有内置中转客户端的 Mower 版本使用；该客户端接入目前尚未发布。开源客户端不能证明其运行的代码未经修改，合法凭据持有人仍可模拟协议。服务通过准入、操作限制、限额及吊销控制用途，不承诺阻止所有伪装或滥用。
 
@@ -59,6 +59,6 @@ python -m build
 
 测试只访问回环地址和临时文件，不需要 Mower 主仓、设备或线上服务。GitHub Actions 在 Windows、Linux、macOS 上执行这些检查；实际公网 DNS、生产证书及服务管理配置需在部署环境验收。
 
-协议与允许的操作由本项目的 [protocol.py](mower_relay_server/protocol.py) 独立实现；Mower 主仓维护客户端协议实现和可选跨项目联调测试，不通过 Python 导入共享运行时。协议变更须同时核对两端版本、操作范围和联调结果。
+网关和 Mower 实例独立实现[中转协议](mower_relay_server/protocol.py)。普通 HTTP 接口随实例版本提供。新增本机管理限制、调整传输格式或 WebSocket 订阅时，需要同步核对两端实现。
 
 本项目从 Arknights Mower 的中转实现拆分，保留原项目的 [MIT 许可证](LICENSE)。
