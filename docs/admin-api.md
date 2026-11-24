@@ -1,8 +1,22 @@
 # bot 管理 API
 
-管理 API 与用户 HTTPS/WSS 共用 TCP 58000，默认入口为 `https://free.mower.work:58000/admin/`。所有请求携带 `Authorization: Bearer <管理密钥>`，密钥来自工作目录的 `data/admin-token.txt`，通过可信渠道配置到异机 bot 的环境变量或秘密存储。它与用户准入凭据、实例 token、浏览器 Cookie 不同。
+管理 API 与用户 HTTPS/WSS 共用 TCP 58000，网关主域名为 `https://free.mower.work:58000`。首次部署的管理入口路径为 `/admin/`，已配置的网关使用管理员提供的当前路径。所有请求携带 `Authorization: Bearer <管理密钥>`，密钥来自工作目录的 `data/admin-token.txt`，通过可信渠道配置到异机 bot 的环境变量或秘密存储。它与用户准入凭据、实例 token、浏览器 Cookie 不同。
 
 服务先检查主域名及固定端口的 Host 和独立管理密钥，再解析输入或读写凭据数据库。请求体最多 4 KiB。QQ 用户身份验证和是否通过审核由 bot 判断，持有管理密钥的程序可以签发凭据、修改子域名及吊销凭据。
+
+## 接入已配置的网关
+
+向网关管理员领取当前入口路径和管理密钥。把路径填入本机工具登录页的“管理入口路径”，或保存到 bot 的 `MOWER_RELAY_ADMIN_PATH`，例如 `/example-ops/`。路径以 `/` 开头和结尾。bot 从运行环境的 `MOWER_RELAY_ADMIN_TOKEN` 读取管理密钥，修改配置后重新载入 bot。
+
+在配置好这两个环境变量的 Windows CMD 中运行以下只读请求，确认 bot 可以访问当前入口：
+
+```cmd
+curl.exe -sS -i --max-time 10 -H "Authorization: Bearer %MOWER_RELAY_ADMIN_TOKEN%" "https://free.mower.work:58000%MOWER_RELAY_ADMIN_PATH%entry"
+```
+
+返回 `200` 时，响应中的 `path` 应与当前入口路径一致。`403` 表示需要核对管理密钥，`404` 表示需要核对主域名和入口路径。此次检查只读取入口设置。
+
+## 凭据和入口接口
 
 以下路径相对于当前管理入口。
 
@@ -28,9 +42,9 @@
 
 ## 网关管理页面
 
-更新网关后，在浏览器打开主域名的 `https://free.mower.work:58000/admin/`，用网关管理密钥登录。可在此签发凭据、刷新连接状态、改名或吊销。
+在浏览器打开主域名加上当前入口路径，用网关管理密钥登录。例如路径为 `/example-ops/` 时，管理页面地址为 `https://free.mower.work:58000/example-ops/`。可在此签发凭据、刷新连接状态、改名或吊销。
 
-点击 **管理入口**，填写本站路径（例如 `/ops-mower/`）并保存。当前网页随即切换到新地址，管理 API 同时迁移，例如凭据列表变为 `/ops-mower/users`。旧网页和旧 API 立即返回 404。请更新书签、bot 的 `MOWER_RELAY_ADMIN_PATH` 和其他本机工具的登录路径。已签发的中转凭据继续有效。
+点击 **管理入口**，填写本站路径（例如 `/example-ops/`）并保存。当前网页随即切换到新地址，管理 API 同时迁移，例如凭据列表变为 `/example-ops/users`。旧网页和旧 API 立即返回 404。请更新书签、bot 的 `MOWER_RELAY_ADMIN_PATH` 和其他本机工具的登录路径。已签发的中转凭据继续有效。
 
 网关将路径保存在凭据数据库旁的 `admin-entry.json`，重启后继续使用。忘记入口时可在服务器上查看该文件，首次设置前使用默认的 `/admin/`。
 
@@ -58,7 +72,7 @@ import requests
 
 
 def rename_for_qq(qq_id, old_name, new_name):
-    path = os.environ.get("MOWER_RELAY_ADMIN_PATH", "/admin/").strip("/")
+    path = os.environ["MOWER_RELAY_ADMIN_PATH"].strip("/")
     base = f"https://free.mower.work:58000/{path}/users"
     subject = f"qq:{qq_id}"
     headers = {"Authorization": "Bearer " + os.environ["MOWER_RELAY_ADMIN_TOKEN"]}
