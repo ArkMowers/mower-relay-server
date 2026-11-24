@@ -411,6 +411,8 @@ def test_gateway_requires_individual_admission_and_local_login_before_http(tmp_p
                 assert (
                     await browser.get("/dialog/folder", headers=headers)
                 ).status == 404
+                assert (await browser.head("/stop", headers=headers)).status == 404
+                assert (await browser.head("/", headers=headers)).status == 200
                 request_task = asyncio.create_task(
                     browser.get(
                         "/future-feature/status",
@@ -767,7 +769,8 @@ def test_rename_keeps_credentials_and_moves_a_connected_agent(tmp_path):
         ("PATCH", "/stage/event-rerun", True),
         ("POST", "/maa-copilot", True),
         ("DELETE", "/weekly-plans/%E5%91%A8%E4%B8%80", True),
-        ("HEAD", "/process-control/info", True),
+        ("HEAD", "/process-control/info", False),
+        ("HEAD", "/stop", False),
         ("GET", "/config-backup/export", True),
         ("GET", "/maa-resource-update/status", True),
         ("POST", "/maa-update/start", False),
@@ -796,12 +799,7 @@ def test_relay_forwards_business_paths_and_excludes_local_management(
     assert allowed_request(method, path) is expected
 
 
-def test_relay_validates_head_and_download_responses():
-    validate_response("/stage/event-rerun", 200, "application/json", b"", method="HEAD")
-    with pytest.raises(ValueError):
-        validate_response(
-            "/stage/event-rerun", 200, "application/json", b"{}", method="HEAD"
-        )
+def test_relay_validates_download_responses():
     validate_response("/config-backup/export", 200, "application/zip", b"PK\x03\x04")
     with pytest.raises(ValueError):
         validate_response("/future-feature/export", 200, "text/html", b"<html></html>")
