@@ -260,7 +260,7 @@ def test_missing_build_and_ambiguous_credential_are_rejected(tmp_path):
                 Registry(registry).transaction(write=True) as db,
             ):
                 db.execute(
-                    "INSERT INTO users SELECT 'bob', '', 1, credential_sha256 FROM users WHERE subdomain='alice'"
+                    "INSERT INTO users(subdomain,subject,enabled,credential_sha256) SELECT 'bob', '', 1, credential_sha256 FROM users WHERE subdomain='alice'"
                 )
             assert not app[GATEWAY].peers
 
@@ -532,9 +532,11 @@ def test_sessions_are_bound_to_tenant_and_connection_and_login_is_limited(tmp_pa
         app, registry, _ = fixture_gateway(tmp_path)
         issue(registry, "bob", subject="qq:bob")
         gateway = app[GATEWAY]
-        alice = Peer(Mock(closed=False), await gateway.admitted("alice"))
+        alice = Peer(
+            Mock(closed=False), await gateway.admitted("alice"), "alice", gateway
+        )
         alice.ui_build = "a" * 64
-        bob = Peer(Mock(closed=False), await gateway.admitted("bob"))
+        bob = Peer(Mock(closed=False), await gateway.admitted("bob"), "bob", gateway)
         bob.ui_build = "b" * 64
         gateway.peers.update(alice=alice, bob=bob)
         signed = gateway.signer.dumps(
@@ -553,7 +555,10 @@ def test_sessions_are_bound_to_tenant_and_connection_and_login_is_limited(tmp_pa
                     )
                 ).status == 401
                 gateway.peers["alice"] = Peer(
-                    Mock(closed=False), await gateway.admitted("alice")
+                    Mock(closed=False),
+                    await gateway.admitted("alice"),
+                    "alice",
+                    gateway,
                 )
                 gateway.peers["alice"].ui_build = "a" * 64
                 assert (await browser.get("/", headers=headers)).status == 401
@@ -620,7 +625,9 @@ def test_gateway_rejects_concurrency_and_traffic_excess_before_dispatch(tmp_path
     async def scenario():
         app, _, _ = fixture_gateway(tmp_path)
         gateway = app[GATEWAY]
-        peer = Peer(Mock(closed=False), await gateway.admitted("alice"))
+        peer = Peer(
+            Mock(closed=False), await gateway.admitted("alice"), "alice", gateway
+        )
         peer.ui_build = "a" * 64
         gateway.peers["alice"] = peer
         signed = gateway.signer.dumps(
@@ -642,7 +649,7 @@ def test_gateway_rejects_concurrency_and_traffic_excess_before_dispatch(tmp_path
                 await browser.post("/plan", headers=headers, data=b"x")
             ).status == 429
             assert not peer.pending and peer.inflight == 0
-            peer.ws.send_json.assert_not_called()
+            peer.ws.send_str.assert_not_called()
             gateway.peers.clear()
 
     asyncio.run(scenario())
@@ -719,7 +726,10 @@ def test_rename_keeps_credentials_and_moves_a_connected_agent(tmp_path):
                 assert (await old.receive(timeout=3)).type == WSMsgType.CLOSE
                 response = await task
                 assert response.status == 200
-                assert await response.json() == {
+                detail = await response.json()
+                traffic = detail.pop("daily_traffic")
+                assert 0 < traffic["used_bytes"] < traffic["limit_bytes"]
+                assert detail == {
                     "subdomain": "new-name",
                     "subject": "qq:alice",
                     "enabled": True,
@@ -795,3 +805,108 @@ def test_relay_validates_head_and_download_responses():
     validate_response("/config-backup/export", 200, "application/zip", b"PK\x03\x04")
     with pytest.raises(ValueError):
         validate_response("/future-feature/export", 200, "text/html", b"<html></html>")
+
+
+def test_daily_quota_meters_both_directions_rejects_and_survives_restart(
+    tmp_path, caplog
+):
+    async def scenario():
+        app, path, credential = fixture_gateway(tmp_path)
+        gateway = app[GATEWAY]
+        gateway.daily_limit = 4000
+        admin = {"Host": "free.mower.work:58000", "Authorization": "Bearer " + "a" * 48}
+        connect = {**admin, "Authorization": "Bearer " + credential}
+        hello = json.dumps({"op": "hello", "version": 1, "ui_build": "a" * 64})
+        expected = len(hello.encode())
+
+        async with TestClient(TestServer(app)) as browser:
+            async with browser.ws_connect("/__mower/connect", headers=connect) as agent:
+                await agent.send_str(hello)
+                ready = await agent.receive_str(timeout=2)
+                expected += len(ready.encode())
+                peer = gateway.peers["alice"]
+                cookie = gateway.signer.dumps(
+                    {"tenant": "alice", "connection": peer.generation}
+                )
+                host = {
+                    "Host": "alice.free.mower.work:58000",
+                    "Cookie": f"{COOKIE}={cookie}",
+                    "Origin": public_origin("alice"),
+                    "token": "instance-test-token",
+                }
+                async with browser.ws_connect("/log", headers=host) as browser_socket:
+                    opening = await agent.receive_str(timeout=2)
+                    socket_id = json.loads(opening)["id"]
+                    expected += len(opening.encode())
+                    await browser_socket.send_str("你好")
+                    upload = await agent.receive_str(timeout=2)
+                    assert json.loads(upload)["data"] == "你好"
+                    expected += len(upload.encode())
+                    download = json.dumps(
+                        {"op": "ws_data", "id": socket_id, "data": "日志"},
+                        ensure_ascii=False,
+                    )
+                    await agent.send_str(download)
+                    assert await browser_socket.receive_str(timeout=2) == "日志"
+                    expected += len(download.encode())
+                closing = await agent.receive_str(timeout=2)
+                assert json.loads(closing)["op"] == "ws_close"
+                req = asyncio.create_task(
+                    browser.post("/plan", headers=host, data="中文".encode())
+                )
+                sent = await agent.receive_str(timeout=2)
+                expected += len(sent.encode())
+                reply = json.dumps(
+                    {
+                        "op": "response",
+                        "id": json.loads(sent)["id"],
+                        "status": 200,
+                        "mime": "text/plain",
+                        "body": base64.b64encode(b"x" * 1850).decode(),
+                    }
+                )
+                await agent.send_str(reply)
+                result = await req
+                assert await result.text() == "x" * 1850
+                expected += len(reply.encode())
+                stats = (
+                    await (
+                        await browser.get("/admin/users/alice", headers=admin)
+                    ).json()
+                )["daily_traffic"]
+                assert stats["used_bytes"] == expected
+                assert stats["state"] == "warning"
+                req = asyncio.create_task(browser.get("/status", headers=host))
+                sent = await agent.receive_str(timeout=2)
+                expected += len(sent.encode())
+                await agent.send_json(
+                    {
+                        "op": "response",
+                        "id": json.loads(sent)["id"],
+                        "status": 200,
+                        "mime": "text/plain",
+                        "body": base64.b64encode(b"x" * 1500).decode(),
+                    }
+                )
+                assert (await req).status == 429
+                assert (await agent.receive(timeout=2)).type == WSMsgType.CLOSE
+            record = (
+                await (await browser.get("/admin/users/alice", headers=admin)).json()
+            )["daily_traffic"]
+            assert record["used_bytes"] == expected
+            assert record["state"] == "limited"
+        restarted = create_app(path, tmp_path, "s" * 48, "a" * 48)
+        async with TestClient(TestServer(restarted)) as browser:
+            with pytest.raises(WSServerHandshakeError) as denied:
+                await browser.ws_connect("/__mower/connect", headers=connect)
+            assert denied.value.status == 429
+            assert (await browser.get("/", headers=host)).status == 429
+
+    asyncio.run(scenario())
+    alerts = [r.getMessage() for r in caplog.records if "中转日配额" in r.getMessage()]
+    assert len(alerts) == 2
+    assert "warning" in alerts[0] and "limited" in alerts[1]
+    assert all(
+        "subdomain=alice" in line and "instance-test-token" not in line
+        for line in alerts
+    )

@@ -11,7 +11,7 @@ from mower_relay_server.protocol import (
     public_origin,
     valid_subdomain,
 )
-from mower_relay_server.registry import RegistryConflict
+from mower_relay_server.registry import RegistryConflict, daily_usage, quota_day
 
 
 def install_admin_routes(app, gateway, token, entry):
@@ -20,7 +20,19 @@ def install_admin_routes(app, gateway, token, entry):
 
     def summary(name, record):
         peer = gateway.peers.get(name)
+        day = quota_day()
+        used, state = (
+            daily_usage(record, day)
+            if "traffic_day" in record.keys()
+            else (0, "normal")
+        )
         return {
+            "daily_traffic": {
+                "day": day,
+                "used_bytes": used,
+                "limit_bytes": gateway.daily_limit,
+                "state": state,
+            },
             "subdomain": name,
             "subject": record["subject"],
             "enabled": bool(record["enabled"]),
